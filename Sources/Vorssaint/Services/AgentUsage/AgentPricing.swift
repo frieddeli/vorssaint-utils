@@ -90,12 +90,12 @@ struct AgentPriceList: Equatable {
                               usOnlyMultiplier: usOnly)
     }
 
-    /// The newer of the list inside the app and the last one downloaded. On
-    /// the same day the download wins, since it may carry a correction.
+    /// The newer of the list inside the app and the last one downloaded.
+    /// Strictly newer downloads win; equal dates keep the bundled list.
     static func newer(_ shipped: AgentPriceList?, _ downloaded: AgentPriceList?) -> AgentPriceList? {
         guard let downloaded else { return shipped }
         guard let shipped else { return downloaded }
-        return downloaded.updated >= shipped.updated ? downloaded : shipped
+        return downloaded.updated > shipped.updated ? downloaded : shipped
     }
 
     private static func models(_ value: Any?, prefix: String?) -> [Model]? {
@@ -278,6 +278,7 @@ enum AgentPricing {
             var parts = id.dropFirst(7).split(separator: "-").map(String.init)
             parts.removeAll { $0 == "latest" }
             parts.removeAll { $0.count >= 6 && $0.allSatisfy(\.isNumber) }
+            parts.removeAll { $0 == "high" || $0 == "low" || $0 == "medium" }
             let words = parts.filter { !$0.allSatisfy({ $0.isNumber || $0 == "." }) }
             let versions = parts.filter { $0.allSatisfy({ $0.isNumber || $0 == "." }) }
             let version = versions.joined(separator: ".")

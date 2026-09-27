@@ -186,7 +186,8 @@ enum NotchAgentTests {
         let early = AgentPriceList.decode(priceJSON(updated: "2026-09-22"))
         let late = AgentPriceList.decode(priceJSON(updated: "2026-10-01"))
         suite.expect(AgentPriceList.newer(early, late) == late && AgentPriceList.newer(late, early) == late
-                        && AgentPriceList.newer(nil, early) == early && AgentPriceList.newer(early, nil) == early,
+                        && AgentPriceList.newer(nil, early) == early && AgentPriceList.newer(early, nil) == early
+                        && AgentPriceList.newer(early, early) == early,
                      "the newer of the shipped and downloaded lists wins")
         suite.expect(!AgentPricing.install(shipped), "installing the list in use changes nothing")
 
@@ -469,7 +470,21 @@ enum NotchAgentTests {
         _ = AgentLogParser.parseAntigravity(settingsLine, state: &modelState, now: now)
         suite.expect(modelState.model == "Gemini 3.8 Flash (High)", "model extraction captures full model name without decimal truncation")
         suite.expect(AgentPricing.displayName(modelState.model) == "Gemini 3.8 Flash", "model display name formats Gemini models cleanly")
+        suite.expect(AgentPricing.displayName("gemini-3.8-flash-high") == "Gemini 3.8 Flash", "gemini-3.8-flash-high formats cleanly")
         suite.expect(AgentPricing.price(for: modelState.model) != nil, "Gemini 3.8 Flash resolves to pricing table")
+        suite.expect(AgentPricing.price(for: "Gemini 3.8 Pro") != nil, "Gemini 3.8 Pro resolves to pricing table")
+        suite.expect(AgentPricing.price(for: "Gemini 2.5 Flash Lite") != nil, "Gemini 2.5 Flash Lite resolves to pricing table")
+        suite.expect(AgentPricing.price(for: "gemini-ultra") != nil, "Gemini Ultra resolves to pricing table")
+
+        // Mid-turn response opens turn if closed
+        var midState = AgentLogState()
+        let midStore = AgentUsageStore()
+        midStore.reportsTransitions = true
+        let midToolCall = line(#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"RUNNING","created_at":"2026-09-28T00:00:01.000Z","tool_calls":[{"tool_name":"run_command","args":{"CommandLine":"ls"}}]}"#)
+        _ = midStore.apply(AgentLogParser.parseAntigravity(midToolCall, state: &midState, now: now),
+                           file: "brain/conv-3/transcript.jsonl", provider: .antigravity,
+                           tracksTurns: true, modified: now)
+        suite.expect(midStore.live.count == 1, "PLANNER_RESPONSE without prior USER_INPUT begins a live turn")
 
         // Error status ends turn as incomplete
         var errState = AgentLogState()
@@ -481,8 +496,8 @@ enum NotchAgentTests {
         suite.expect(errStore.live.count == 1, "user input opens a live turn in Antigravity")
         let errLine = line(#"{"step_index":2,"type":"PLANNER_RESPONSE","status":"ERROR","created_at":"2026-09-28T00:00:04.000Z","content":"Fatal API failure"}"#)
         let errEvents = errStore.apply(AgentLogParser.parseAntigravity(errLine, state: &errState, now: now),
-                                       file: "brain/conv-2/transcript.jsonl", provider: .antigravity,
-                                       tracksTurns: true, modified: now)
+                           file: "brain/conv-2/transcript.jsonl", provider: .antigravity,
+                           tracksTurns: true, modified: now)
         suite.expect(errEvents.isEmpty && errStore.live.isEmpty, "an error ends the turn without a finished event")
     }
 

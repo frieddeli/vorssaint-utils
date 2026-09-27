@@ -295,6 +295,9 @@ enum AgentLogParser {
             if let model = json["model"] as? String, !model.isEmpty {
                 state.model = native(model)
             }
+            if state.model.isEmpty {
+                state.model = "Gemini 2.5 Pro"
+            }
             let toolCalls = json["tool_calls"] as? [[String: Any]] ?? []
             for tool in toolCalls {
                 if let args = tool["args"] as? [String: Any] {
@@ -328,31 +331,39 @@ enum AgentLogParser {
                 session: state.session, tokens: tokens, cost: priced.cost, savings: priced.savings
             )
             let usageEntry = AgentLogEntry.usage(key: key, record: record, billable: billable)
+            var entries: [AgentLogEntry] = []
+            if !state.turnOpen {
+                state.turnOpen = true
+                entries.append(.turnBegan(date))
+            }
+            entries.append(usageEntry)
 
             let hasTools = !toolCalls.isEmpty
             if !hasTools && (status == "DONE" || status == nil) {
-                let open = state.turnOpen
                 state.turnOpen = false
                 state.turnPromptChars = 0
-                var entries = [usageEntry]
-                if open { entries.append(.turnEnded(date, completed: true, duration: nil)) }
+                entries.append(.turnEnded(date, completed: true, duration: nil))
                 return entries
             } else if status == "ERROR" {
-                let open = state.turnOpen
                 state.turnOpen = false
                 state.turnPromptChars = 0
-                var entries = [usageEntry]
-                if open { entries.append(.turnEnded(date, completed: false, duration: nil)) }
+                entries.append(.turnEnded(date, completed: false, duration: nil))
                 return entries
             } else {
-                return [usageEntry, .turnActive(date)]
+                entries.append(.turnActive(date))
+                return entries
             }
 
         case "GENERIC":
-            if state.turnOpen {
-                if let content = json["content"] as? String {
-                    state.turnPromptChars += content.count
+            if let content = json["content"] as? String {
+                if let modelMatch = extractAntigravityModel(content) {
+                    state.model = modelMatch
                 }
+                if state.turnOpen {
+                    state.turnPromptChars += content.count
+                    return [.turnActive(date)]
+                }
+            } else if state.turnOpen {
                 return [.turnActive(date)]
             }
             return []

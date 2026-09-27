@@ -552,9 +552,11 @@ final class AgentUsageService: ObservableObject {
                 self.pricesFailed = false
                 self.pricesSaved = Date()
                 self.queue.async {
+                    guard self.readerSession == session else { return }
+                    guard let effective = AgentPriceList.newer(self.shippedPrices, list),
+                          effective == list else { return }
                     AgentPriceSource.save(data)
-                    guard self.readerSession == session,
-                          AgentPricing.install(AgentPriceList.newer(self.shippedPrices, list) ?? list) else { return }
+                    guard AgentPricing.install(effective) else { return }
                     self.store.reprice()
                     self.publish()
                 }
