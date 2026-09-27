@@ -273,7 +273,11 @@ enum AgentLogReader {
     static let maximumLine = 32 << 20
 
     static func isLog(_ path: String) -> Bool {
-        path.hasSuffix(".jsonl") && !path.hasSuffix("transcript_full.jsonl")
+        guard path.hasSuffix(".jsonl") else { return false }
+        if path.contains(".gemini/antigravity-cli") {
+            return (path as NSString).lastPathComponent == "transcript.jsonl"
+        }
+        return true
     }
 
     /// Log files changed since `horizon`, newest last so live turns settle
