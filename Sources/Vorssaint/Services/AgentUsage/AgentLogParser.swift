@@ -254,6 +254,121 @@ enum AgentLogParser {
             tokens: tokens, cost: priced.cost, savings: priced.savings), billable: billable)
     }
 
+    // MARK: Antigravity
+
+    static func parseAntigravity(_ line: Data, state: inout AgentLogState, now: Date) -> [AgentLogEntry] {
+        guard contains(line, #""type":""#) else { return [] }
+        guard let json = object(line), let type = json["type"] as? String else { return [] }
+        let date = timestamp(json["created_at"]) ?? now
+        let status = json["status"] as? String
+        let step = json["step_index"] as? Int ?? 0
+
+        switch type {
+        case "USER_INPUT":
+            state.turnOpen = true
+            if state.model.isEmpty {
+                state.model = "Gemini 2.5 Pro"
+            }
+            if let content = json["content"] as? String {
+                if let modelMatch = extractAntigravityModel(content) {
+                    state.model = modelMatch
+                }
+                if state.project.isEmpty, let projectMatch = extractAntigravityProject(content) {
+                    state.project = projectMatch
+                }
+                if state.session.isEmpty, let sessionMatch = extractAntigravitySession(content) {
+                    state.session = sessionMatch
+                }
+            }
+            let key = "antigravity:\(state.session):\(step)"
+            let record = AgentUsageRecord(
+                provider: .antigravity, date: date, model: state.model, project: state.project,
+                session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
+            )
+            return [.turnBegan(date), .usage(key: key, record: record, billable: AgentBillable())]
+
+        case "PLANNER_RESPONSE":
+            if let model = json["model"] as? String, !model.isEmpty {
+                state.model = native(model)
+            }
+            var toolInvoked = false
+            if let toolCalls = json["tool_calls"] as? [[String: Any]] {
+                toolInvoked = true
+                for tool in toolCalls {
+                    if let args = tool["args"] as? [String: Any] {
+                        if let cwd = args["Cwd"] as? String, !cwd.isEmpty {
+                            state.project = projectName(cwd.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
+                        } else if let path = args["AbsolutePath"] as? String, !path.isEmpty {
+                            let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                            state.project = projectName((cleanPath as NSString).deletingLastPathComponent)
+                        }
+                    }
+                }
+            }
+            if toolInvoked {
+                var entries: [AgentLogEntry] = [.turnActive(date)]
+                let key = "antigravity:\(state.session):\(step)"
+                let record = AgentUsageRecord(
+                    provider: .antigravity, date: date, model: state.model, project: state.project,
+                    session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
+                )
+                entries.append(.usage(key: key, record: record, billable: AgentBillable()))
+                return entries
+            }
+            if status == "DONE" {
+                let open = state.turnOpen
+                state.turnOpen = false
+                return open ? [.turnEnded(date, completed: true, duration: nil)] : []
+            } else if status == "ERROR" {
+                let open = state.turnOpen
+                state.turnOpen = false
+                return open ? [.turnEnded(date, completed: false, duration: nil)] : []
+            } else {
+                return [.turnActive(date)]
+            }
+
+        case "GENERIC":
+            return state.turnOpen ? [.turnActive(date)] : []
+
+        default:
+            return []
+        }
+    }
+
+    private static func extractAntigravityModel(_ content: String) -> String? {
+        if let range = content.range(of: "Model Selection` from None to ") {
+            let tail = content[range.upperBound...]
+            if let end = tail.firstIndex(of: ".") {
+                return String(tail[..<end]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    private static func extractAntigravityProject(_ content: String) -> String? {
+        if let range = content.range(of: "[URI] -> [CorpusName]:\n") {
+            let tail = content[range.upperBound...]
+            if let lineEnd = tail.firstIndex(of: "\n") {
+                let line = String(tail[..<lineEnd])
+                if let arrow = line.range(of: " -> ") {
+                    return projectName(String(line[..<arrow.lowerBound]))
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func extractAntigravitySession(_ content: String) -> String? {
+        if let range = content.range(of: "Conversation ID: ") {
+            let tail = content[range.upperBound...]
+            let session = tail.prefix(while: { $0.isLetter || $0.isNumber || $0 == "-" })
+            if !session.isEmpty {
+                return String(session)
+            }
+        }
+        return nil
+    }
+
     /// Input counts include what came from the cache.
     static func codexTokens(_ usage: [String: Any]) -> AgentTokens {
         let input = int(usage["input_tokens"])

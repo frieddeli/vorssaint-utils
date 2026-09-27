@@ -10,6 +10,7 @@ extension AgentProvider {
         switch self {
         case .claude: return Color(red: 0.85, green: 0.47, blue: 0.34)
         case .codex: return Color(red: 0.49, green: 0.60, blue: 1.0)
+        case .antigravity: return Color(red: 0.26, green: 0.52, blue: 0.96)
         }
     }
 }
@@ -371,6 +372,7 @@ private extension AgentProvider {
         switch self {
         case .claude: return [AgentClaudeAppUsage.bundleIdentifier]
         case .codex: return ["com.openai.codex", "com.openai.chat"]
+        case .antigravity: return ["com.google.antigravity", "com.google.antigravity.ide"]
         }
     }
 
@@ -383,6 +385,7 @@ private extension AgentProvider {
         switch self {
         case .claude: return ["TrayIconTemplate"]
         case .codex: return ["chatgptTemplate"]
+        case .antigravity: return ["AntigravityTemplate", "AppIcon"]
         }
     }
 }

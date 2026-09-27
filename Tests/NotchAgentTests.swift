@@ -16,6 +16,7 @@ enum NotchAgentTests {
         claudeParsing(suite)
         claudeTurns(suite)
         codexParsing(suite)
+        antigravityParsing(suite)
         timestamps(suite)
         summary(suite)
         AgentUsageSummaryCacheTests.run(suite)
@@ -435,6 +436,48 @@ enum NotchAgentTests {
                                                state: &aborted, now: now)
                         == [.turnEnded(AgentTimestamp.parse("2026-09-22T15:00:00.000Z"), completed: false, duration: 10.961)],
                      "an aborted turn ends without counting as finished")
+    }
+
+    // MARK: Antigravity logs
+
+    private static func antigravityParsing(_ suite: TestSuite) {
+        let now = Date(timeIntervalSince1970: 0)
+        var state = AgentLogState()
+        let store = AgentUsageStore()
+        store.reportsTransitions = true
+
+        let userPrompt = line(#"{"step_index":1,"type":"USER_INPUT","status":"DONE","created_at":"2026-09-28T00:00:00.000Z","content":"Please check the codebase in /Users/me/projects/cool-app"}"#)
+        let toolCall = line(#"{"step_index":2,"type":"PLANNER_RESPONSE","status":"RUNNING","created_at":"2026-09-28T00:00:02.000Z","thinking":"Let me inspect the files","tool_calls":[{"tool_name":"view_file","args":{"AbsolutePath":"/Users/me/projects/cool-app/Package.swift"}}]}"#)
+        let toolResult = line(#"{"step_index":3,"type":"GENERIC","status":"DONE","created_at":"2026-09-28T00:00:03.000Z","content":"// swift-tools-version: 6.0"}"#)
+        let done = line(#"{"step_index":4,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-28T00:00:05.000Z","content":"All checks completed successfully."}"#)
+
+        var events: [AgentUsageEvent] = []
+        for data in [userPrompt, toolCall, toolResult, done] {
+            events += store.apply(AgentLogParser.parseAntigravity(data, state: &state, now: now),
+                                  file: "brain/conv-1/transcript.jsonl", provider: .antigravity,
+                                  tracksTurns: true, modified: now,
+                                  now: Date(timeIntervalSince1970: 1_790_500_000))
+        }
+
+        suite.expect(state.project == "cool-app", "the project name is inferred from tool invocation arguments")
+        suite.expect(state.model == "Gemini 2.5 Pro", "the model defaults to Gemini 2.5 Pro")
+        suite.expect(events == [.finished(provider: .antigravity, duration: 5.0, cost: 0, tokens: 0, project: "cool-app")],
+                     "a completed Antigravity turn emits a finished event with duration and project")
+        suite.expect(store.live.isEmpty, "the live turn is closed after completion")
+
+        // Error status ends turn as incomplete
+        var errState = AgentLogState()
+        let errStore = AgentUsageStore()
+        errStore.reportsTransitions = true
+        _ = errStore.apply(AgentLogParser.parseAntigravity(userPrompt, state: &errState, now: now),
+                           file: "brain/conv-2/transcript.jsonl", provider: .antigravity,
+                           tracksTurns: true, modified: now)
+        suite.expect(errStore.live.count == 1, "user input opens a live turn in Antigravity")
+        let errLine = line(#"{"step_index":2,"type":"PLANNER_RESPONSE","status":"ERROR","created_at":"2026-09-28T00:00:04.000Z","content":"Fatal API failure"}"#)
+        let errEvents = errStore.apply(AgentLogParser.parseAntigravity(errLine, state: &errState, now: now),
+                                       file: "brain/conv-2/transcript.jsonl", provider: .antigravity,
+                                       tracksTurns: true, modified: now)
+        suite.expect(errEvents.isEmpty && errStore.live.isEmpty, "an error ends the turn without a finished event")
     }
 
     private static func timestamps(_ suite: TestSuite) {
@@ -947,6 +990,7 @@ enum NotchAgentTests {
         suite.expect(NotchAgentSupport.cards(in: defaults) == [.trend, .spend, .limits, .live, .models],
                      "the saved order ignores unknown and repeated cards and appends new ones")
         defaults.set(false, forKey: DefaultsKey.notchAgentsCodex)
+        defaults.set(false, forKey: DefaultsKey.notchAgentsAntigravity)
         suite.expect(NotchAgentSupport.providers(in: defaults) == [.claude], "an agent can be left out")
         defaults.set(false, forKey: DefaultsKey.notchAgentsFinishAlert)
         defaults.set(95.0, forKey: DefaultsKey.notchAgentsLimitThreshold)
@@ -956,6 +1000,7 @@ enum NotchAgentTests {
                      "alerts follow their switches and a budget must be positive")
 
         let keys = [DefaultsKey.notchAgentsEnabled, DefaultsKey.notchAgentsClaude, DefaultsKey.notchAgentsCodex,
+                    DefaultsKey.notchAgentsAntigravity,
                     DefaultsKey.notchAgentsCardOrder, DefaultsKey.notchAgentsHiddenCards, DefaultsKey.notchAgentsPeriod,
                     DefaultsKey.notchAgentsLimitDisplay, DefaultsKey.notchAgentsLiveActivity, DefaultsKey.notchAgentsReadout,
                     DefaultsKey.notchAgentsFinishAlert, DefaultsKey.notchAgentsFinishMinimum, DefaultsKey.notchAgentsLimitAlert,

@@ -10,6 +10,7 @@ struct NotchAgentsSettingsControls: View {
     @ObservedObject private var usage = AgentUsageService.shared
     @AppStorage(DefaultsKey.notchAgentsClaude) private var claude = true
     @AppStorage(DefaultsKey.notchAgentsCodex) private var codex = true
+    @AppStorage(DefaultsKey.notchAgentsAntigravity) private var antigravity = true
     @AppStorage(DefaultsKey.notchAgentsCardOrder) private var cardOrder = ""
     @AppStorage(DefaultsKey.notchAgentsHiddenCards) private var hiddenCards = ""
     @AppStorage(DefaultsKey.notchAgentsLimitDisplay) private var limitDisplay = NotchAgentLimitDisplay.remaining.rawValue
@@ -36,6 +37,10 @@ struct NotchAgentsSettingsControls: View {
         return (stored + NotchAgentCard.allCases).filter { seen.insert($0).inserted }
     }
 
+    private var enabledProvidersCount: Int {
+        (claude ? 1 : 0) + (codex ? 1 : 0) + (antigravity ? 1 : 0)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(text.settingsDescription)
@@ -44,6 +49,7 @@ struct NotchAgentsSettingsControls: View {
                 .fixedSize(horizontal: false, vertical: true)
             providerRow(.claude, isOn: $claude)
             providerRow(.codex, isOn: $codex)
+            providerRow(.antigravity, isOn: $antigravity)
 
             Divider()
             Text(text.cardsTitle).font(.subheadline.weight(.medium))
@@ -205,9 +211,9 @@ struct NotchAgentsSettingsControls: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
-            // One agent stays on; turning the section off stops both.
+            // One agent stays on; turning the section off stops all.
             Toggle(provider.displayName, isOn: isOn).labelsHidden().toggleStyle(.switch)
-                .disabled(isOn.wrappedValue && !(claude && codex))
+                .disabled(isOn.wrappedValue && enabledProvidersCount <= 1)
         }
     }
 

@@ -208,7 +208,8 @@ struct AgentLogRoot: Equatable {
     /// link elsewhere, as dotfile setups do, would otherwise never match.
     static func all(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [AgentLogRoot] {
         [(AgentProvider.claude, ".claude/projects"), (.claude, ".config/claude/projects"),
-         (.codex, ".codex/sessions"), (.codex, ".codex/archived_sessions")].map { provider, path in
+         (.codex, ".codex/sessions"), (.codex, ".codex/archived_sessions"),
+         (.antigravity, ".gemini/antigravity-cli/brain")].map { provider, path in
             AgentLogRoot(provider: provider, url: canonical(home.appending(path: path, directoryHint: .isDirectory)))
         }
     }
@@ -248,7 +249,13 @@ final class AgentLogCursor {
         let name = (path as NSString).lastPathComponent
         let parent = provider == .claude ? AgentLogCursor.parent(of: path) : nil
         self.parent = parent
-        tracksTurns = provider == .claude ? parent == nil : !name.contains("_")
+        tracksTurns = provider == .claude ? parent == nil : (provider == .codex ? !name.contains("_") : true)
+        if provider == .antigravity {
+            let parts = path.split(separator: "/")
+            if let brainIndex = parts.firstIndex(of: "brain"), brainIndex + 1 < parts.count {
+                state.session = String(parts[brainIndex + 1])
+            }
+        }
     }
 
     /// Claude Code keeps a session's subagents in `<session>/subagents/`,
@@ -265,7 +272,9 @@ enum AgentLogReader {
     /// usage record; it is skipped rather than held in memory.
     static let maximumLine = 32 << 20
 
-    static func isLog(_ path: String) -> Bool { path.hasSuffix(".jsonl") }
+    static func isLog(_ path: String) -> Bool {
+        path.hasSuffix(".jsonl") && !path.hasSuffix("transcript_full.jsonl")
+    }
 
     /// Log files changed since `horizon`, newest last so live turns settle
     /// on the most recent state. Subagents come after every session, so the
