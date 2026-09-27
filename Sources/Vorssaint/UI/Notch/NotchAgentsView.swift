@@ -271,6 +271,36 @@ private struct NotchAgentLimitsCard: View {
         } else if provider == .claude {
             Text(text.noSession).font(.system(size: 10.5)).foregroundStyle(.secondary)
             setUpLimits
+        } else if provider == .antigravity {
+            let todayUsage = snapshot.usage(.today).byProvider[.antigravity]
+            if let todayUsage, todayUsage.tokens.total > 0 {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(text.period(.today))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.85))
+                        Spacer(minLength: 2)
+                        Text(AgentFormat.cost(todayUsage.cost))
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    HStack(spacing: 4) {
+                        Text(AgentFormat.tokens(todayUsage.tokens.total))
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                        if let rate = todayUsage.tokens.cacheHitRate, rate > 0 {
+                            Text("· \(AgentFormat.percent(rate)) \(text.cached(""))".trimmingCharacters(in: .whitespaces))
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        lastUsed
+                    }
+                }
+            } else {
+                Text(text.waitingForLimits).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
+                lastUsed
+            }
         } else {
             Text(text.waitingForLimits).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
             lastUsed

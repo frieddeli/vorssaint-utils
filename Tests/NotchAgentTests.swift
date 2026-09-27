@@ -459,11 +459,17 @@ enum NotchAgentTests {
                                   now: Date(timeIntervalSince1970: 1_790_500_000))
         }
 
-        suite.expect(state.project == "cool-app", "the project name is inferred from tool invocation arguments")
-        suite.expect(state.model == "Gemini 2.5 Pro", "the model defaults to Gemini 2.5 Pro")
-        suite.expect(events == [.finished(provider: .antigravity, duration: 5.0, cost: 0, tokens: 0, project: "cool-app")],
-                     "a completed Antigravity turn emits a finished event with duration and project")
+        suite.expect(events == [.finished(provider: .antigravity, duration: 5.0, cost: 0.00383625, tokens: 8073, project: "cool-app")],
+                     "a completed Antigravity turn emits a finished event with duration, cost, tokens, and project")
         suite.expect(store.live.isEmpty, "the live turn is closed after completion")
+
+        // Model name extraction and pricing resolution
+        var modelState = AgentLogState()
+        let settingsLine = line(#"{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2026-09-28T00:00:00.000Z","content":"<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.8 Flash (High). No need to comment on this change if the user doesn't ask about it.\n</USER_SETTINGS_CHANGE>"}"#)
+        _ = AgentLogParser.parseAntigravity(settingsLine, state: &modelState, now: now)
+        suite.expect(modelState.model == "Gemini 3.8 Flash (High)", "model extraction captures full model name without decimal truncation")
+        suite.expect(AgentPricing.displayName(modelState.model) == "Gemini 3.8 Flash", "model display name formats Gemini models cleanly")
+        suite.expect(AgentPricing.price(for: modelState.model) != nil, "Gemini 3.8 Flash resolves to pricing table")
 
         // Error status ends turn as incomplete
         var errState = AgentLogState()

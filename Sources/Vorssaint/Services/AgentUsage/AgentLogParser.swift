@@ -30,6 +30,7 @@ struct AgentLogState: Equatable {
     var lastTotal: AgentTokens?
     /// Codex runs the thread on the fast tier, which bills at a premium.
     var fast = false
+    var turnPromptChars = 0
 }
 
 enum AgentLogParser {
@@ -265,11 +266,16 @@ enum AgentLogParser {
 
         switch type {
         case "USER_INPUT":
+            var entries: [AgentLogEntry] = []
+            if state.turnOpen {
+                entries.append(.turnEnded(date, completed: true, duration: nil))
+            }
             state.turnOpen = true
             if state.model.isEmpty {
                 state.model = "Gemini 2.5 Pro"
             }
             if let content = json["content"] as? String {
+                state.turnPromptChars = content.count
                 if let modelMatch = extractAntigravityModel(content) {
                     state.model = modelMatch
                 }
@@ -279,51 +285,77 @@ enum AgentLogParser {
                 if state.session.isEmpty, let sessionMatch = extractAntigravitySession(content) {
                     state.session = sessionMatch
                 }
+            } else {
+                state.turnPromptChars = 0
             }
-            let key = "antigravity:\(state.session):\(step)"
-            let record = AgentUsageRecord(
-                provider: .antigravity, date: date, model: state.model, project: state.project,
-                session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
-            )
-            return [.turnBegan(date), .usage(key: key, record: record, billable: AgentBillable())]
+            entries.append(.turnBegan(date))
+            return entries
 
         case "PLANNER_RESPONSE":
             if let model = json["model"] as? String, !model.isEmpty {
                 state.model = native(model)
             }
-            if let toolCalls = json["tool_calls"] as? [[String: Any]] {
-                for tool in toolCalls {
-                    if let args = tool["args"] as? [String: Any] {
-                        if let cwd = args["Cwd"] as? String, !cwd.isEmpty {
-                            state.project = projectName(cwd.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
-                        } else if let path = args["AbsolutePath"] as? String, !path.isEmpty {
-                            let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                            state.project = projectName((cleanPath as NSString).deletingLastPathComponent)
-                        }
+            let toolCalls = json["tool_calls"] as? [[String: Any]] ?? []
+            for tool in toolCalls {
+                if let args = tool["args"] as? [String: Any] {
+                    if let cwd = args["Cwd"] as? String, !cwd.isEmpty {
+                        state.project = projectName(cwd.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
+                    } else if let path = args["AbsolutePath"] as? String, !path.isEmpty {
+                        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                        state.project = projectName((cleanPath as NSString).deletingLastPathComponent)
                     }
                 }
             }
-            if status == "DONE" {
+
+            let content = json["content"] as? String ?? ""
+            let thinking = json["thinking"] as? String ?? ""
+            let toolChars = toolCalls.reduce(0) { $0 + "\($1)".count }
+            let outputChars = content.count + thinking.count + toolChars
+            let outputTokens = max(1, (outputChars > 0 ? outputChars : line.count) / 4)
+            let reasoningTokens = max(0, thinking.count / 4)
+
+            let totalPromptChars = 16_000 + state.turnPromptChars
+            let promptTokens = max(500, totalPromptChars / 4)
+            let cacheRead = Int(Double(promptTokens) * 0.85)
+            let inputTokens = promptTokens - cacheRead
+            let tokens = AgentTokens(input: inputTokens, cacheWrite: 0, cacheRead: cacheRead,
+                                     output: outputTokens, reasoning: reasoningTokens)
+            let billable = AgentBillable(tokens: tokens)
+            let priced = AgentPricing.cost(billable, model: state.model)
+            let key = "antigravity:\(state.session):\(step)"
+            let record = AgentUsageRecord(
+                provider: .antigravity, date: date, model: state.model, project: state.project,
+                session: state.session, tokens: tokens, cost: priced.cost, savings: priced.savings
+            )
+            let usageEntry = AgentLogEntry.usage(key: key, record: record, billable: billable)
+
+            let hasTools = !toolCalls.isEmpty
+            if !hasTools && (status == "DONE" || status == nil) {
                 let open = state.turnOpen
                 state.turnOpen = false
-                return open ? [.turnEnded(date, completed: true, duration: nil)] : []
+                state.turnPromptChars = 0
+                var entries = [usageEntry]
+                if open { entries.append(.turnEnded(date, completed: true, duration: nil)) }
+                return entries
             } else if status == "ERROR" {
                 let open = state.turnOpen
                 state.turnOpen = false
-                return open ? [.turnEnded(date, completed: false, duration: nil)] : []
-            } else {
-                var entries: [AgentLogEntry] = [.turnActive(date)]
-                let key = "antigravity:\(state.session):\(step)"
-                let record = AgentUsageRecord(
-                    provider: .antigravity, date: date, model: state.model, project: state.project,
-                    session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
-                )
-                entries.append(.usage(key: key, record: record, billable: AgentBillable()))
+                state.turnPromptChars = 0
+                var entries = [usageEntry]
+                if open { entries.append(.turnEnded(date, completed: false, duration: nil)) }
                 return entries
+            } else {
+                return [usageEntry, .turnActive(date)]
             }
 
         case "GENERIC":
-            return state.turnOpen ? [.turnActive(date)] : []
+            if state.turnOpen {
+                if let content = json["content"] as? String {
+                    state.turnPromptChars += content.count
+                }
+                return [.turnActive(date)]
+            }
+            return []
 
         default:
             return []
@@ -331,10 +363,28 @@ enum AgentLogParser {
     }
 
     private static func extractAntigravityModel(_ content: String) -> String? {
-        if let range = content.range(of: "Model Selection` from None to ") {
+        if let range = content.range(of: "Model Selection`") {
             let tail = content[range.upperBound...]
-            if let end = tail.firstIndex(of: ".") {
-                return String(tail[..<end]).trimmingCharacters(in: .whitespaces)
+            if let toRange = tail.range(of: " to ") {
+                let afterTo = tail[toRange.upperBound...]
+                let candidates = [". No need", ".</USER_SETTINGS_CHANGE>", ".\n", "\n"]
+                var endIndex = afterTo.endIndex
+                for candidate in candidates {
+                    if let cRange = afterTo.range(of: candidate), cRange.lowerBound < endIndex {
+                        endIndex = cRange.lowerBound
+                    }
+                }
+                let model = String(afterTo[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !model.isEmpty {
+                    return model
+                }
+            }
+        }
+        if let range = content.range(of: "\"modelName\":\"") {
+            let tail = content[range.upperBound...]
+            if let quote = tail.firstIndex(of: "\"") {
+                let name = String(tail[..<quote]).trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty { return name }
             }
         }
         return nil

@@ -22,7 +22,7 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .claude: return "sparkle"
         case .codex: return "chevron.left.forwardslash.chevron.right"
-        case .antigravity: return "atom"
+        case .antigravity: return "sparkles"
         }
     }
 }
