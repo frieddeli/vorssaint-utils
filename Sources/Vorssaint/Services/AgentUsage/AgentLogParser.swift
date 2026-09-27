@@ -291,9 +291,7 @@ enum AgentLogParser {
             if let model = json["model"] as? String, !model.isEmpty {
                 state.model = native(model)
             }
-            var toolInvoked = false
             if let toolCalls = json["tool_calls"] as? [[String: Any]] {
-                toolInvoked = true
                 for tool in toolCalls {
                     if let args = tool["args"] as? [String: Any] {
                         if let cwd = args["Cwd"] as? String, !cwd.isEmpty {
@@ -305,16 +303,6 @@ enum AgentLogParser {
                     }
                 }
             }
-            if toolInvoked {
-                var entries: [AgentLogEntry] = [.turnActive(date)]
-                let key = "antigravity:\(state.session):\(step)"
-                let record = AgentUsageRecord(
-                    provider: .antigravity, date: date, model: state.model, project: state.project,
-                    session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
-                )
-                entries.append(.usage(key: key, record: record, billable: AgentBillable()))
-                return entries
-            }
             if status == "DONE" {
                 let open = state.turnOpen
                 state.turnOpen = false
@@ -324,7 +312,14 @@ enum AgentLogParser {
                 state.turnOpen = false
                 return open ? [.turnEnded(date, completed: false, duration: nil)] : []
             } else {
-                return [.turnActive(date)]
+                var entries: [AgentLogEntry] = [.turnActive(date)]
+                let key = "antigravity:\(state.session):\(step)"
+                let record = AgentUsageRecord(
+                    provider: .antigravity, date: date, model: state.model, project: state.project,
+                    session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
+                )
+                entries.append(.usage(key: key, record: record, billable: AgentBillable()))
+                return entries
             }
 
         case "GENERIC":

@@ -236,6 +236,7 @@ final class AgentLogCursor {
     let tracksTurns: Bool
     /// The session log a Claude subagent works for.
     let parent: String?
+    let session: String
     var offset: UInt64 = 0
     var identity: UInt64 = 0
     var pending = Data()
@@ -250,12 +251,19 @@ final class AgentLogCursor {
         let parent = provider == .claude ? AgentLogCursor.parent(of: path) : nil
         self.parent = parent
         tracksTurns = provider == .claude ? parent == nil : (provider == .codex ? !name.contains("_") : true)
+        var session = ""
         if provider == .antigravity {
             let parts = path.split(separator: "/")
             if let brainIndex = parts.firstIndex(of: "brain"), brainIndex + 1 < parts.count {
-                state.session = String(parts[brainIndex + 1])
+                session = String(parts[brainIndex + 1])
             }
         }
+        self.session = session
+        state.session = session
+    }
+
+    func resetState() {
+        state = AgentLogState(session: session)
     }
 
     /// Claude Code keeps a session's subagents in `<session>/subagents/`,
@@ -274,7 +282,7 @@ enum AgentLogReader {
 
     static func isLog(_ path: String) -> Bool {
         guard path.hasSuffix(".jsonl") else { return false }
-        if path.contains(".gemini/antigravity-cli") {
+        if path.contains(".gemini/antigravity-cli") || path.contains("/brain/") {
             return (path as NSString).lastPathComponent == "transcript.jsonl"
         }
         return true
@@ -316,7 +324,7 @@ enum AgentLogReader {
             cursor.offset = 0
             cursor.pending = Data()
             cursor.discarding = false
-            cursor.state = AgentLogState()
+            cursor.resetState()
         }
         guard size > cursor.offset, let handle = FileHandle(forReadingAtPath: cursor.path) else { return }
         defer { try? handle.close() }

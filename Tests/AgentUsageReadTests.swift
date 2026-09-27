@@ -56,11 +56,24 @@ enum AgentUsageReadTests {
                 #"{"type":"token_usage_record","timestamp":\#(timestamp),"payload":{"response_id":"r","usage":{"input_tokens":10,"output_tokens":5}}}"#,
                 #"{"type":"event_msg","timestamp":\#(timestamp),"payload":{"type":"token_count","rate_limits":{"plan_type":"pro","primary":{"used_percent":42,"window_minutes":300}}}}"#,
                 #"{"type":"event_msg","timestamp":\#(timestamp),"payload":{"type":"task_complete","duration_ms":20000}}"#
+            ]),
+            (.antigravity, [
+                #"{"step_index":1,"type":"USER_INPUT","status":"DONE","created_at":"2026-09-28T00:00:00Z","content":"work in /tmp/example"}"#,
+                #"{"step_index":2,"type":"PLANNER_RESPONSE","status":"RUNNING","created_at":"2026-09-28T00:00:01Z","thinking":"inspecting","tool_calls":[{"tool_name":"view_file","args":{"Cwd":"/tmp/example"}}]}"#,
+                #"{"step_index":3,"type":"GENERIC","status":"DONE","created_at":"2026-09-28T00:00:02Z","content":"file content"}"#,
+                #"{"step_index":4,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-28T00:00:03Z","content":"finished"}"#
             ])
         ]
         for (provider, lines) in cases {
             // A canonical filename, not a Codex side-thread filename.
-            let file = folder.appending(path: "\(provider.rawValue).jsonl")
+            let file: URL
+            if provider == .antigravity {
+                let sub = folder.appending(path: "brain/session-1")
+                try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+                file = sub.appending(path: "transcript.jsonl")
+            } else {
+                file = folder.appending(path: "\(provider.rawValue).jsonl")
+            }
             do { try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file) }
             catch { suite.expect(false, "the streaming fixture writes its log: \(error)"); continue }
 
