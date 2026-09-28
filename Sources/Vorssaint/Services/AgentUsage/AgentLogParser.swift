@@ -271,9 +271,6 @@ enum AgentLogParser {
                 entries.append(.turnEnded(date, completed: true, duration: nil))
             }
             state.turnOpen = true
-            if state.model.isEmpty {
-                state.model = "Gemini 2.5 Pro"
-            }
             if let content = json["content"] as? String {
                 state.turnPromptChars = content.count
                 if let modelMatch = extractAntigravityModel(content) {
@@ -295,9 +292,6 @@ enum AgentLogParser {
             if let model = json["model"] as? String, !model.isEmpty {
                 state.model = native(model)
             }
-            if state.model.isEmpty {
-                state.model = "Gemini 2.5 Pro"
-            }
             let toolCalls = json["tool_calls"] as? [[String: Any]] ?? []
             for tool in toolCalls {
                 if let args = tool["args"] as? [String: Any] {
@@ -314,14 +308,11 @@ enum AgentLogParser {
             let thinking = json["thinking"] as? String ?? ""
             let toolChars = toolCalls.reduce(0) { $0 + "\($1)".count }
             let outputChars = content.count + thinking.count + toolChars
-            let outputTokens = max(1, (outputChars > 0 ? outputChars : line.count) / 4)
+            let outputTokens = max(0, outputChars / 4)
             let reasoningTokens = max(0, thinking.count / 4)
 
-            let totalPromptChars = 16_000 + state.turnPromptChars
-            let promptTokens = max(500, totalPromptChars / 4)
-            let cacheRead = Int(Double(promptTokens) * 0.85)
-            let inputTokens = promptTokens - cacheRead
-            let tokens = AgentTokens(input: inputTokens, cacheWrite: 0, cacheRead: cacheRead,
+            let promptTokens = max(0, state.turnPromptChars / 4)
+            let tokens = AgentTokens(input: promptTokens, cacheWrite: 0, cacheRead: 0,
                                      output: outputTokens, reasoning: reasoningTokens)
             let billable = AgentBillable(tokens: tokens)
             let priced = AgentPricing.cost(billable, model: state.model)

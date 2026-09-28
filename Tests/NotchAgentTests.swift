@@ -460,9 +460,11 @@ enum NotchAgentTests {
                                   now: Date(timeIntervalSince1970: 1_790_500_000))
         }
 
-        suite.expect(events == [.finished(provider: .antigravity, duration: 5.0, cost: 0.00383625, tokens: 8073, project: "cool-app")],
+        suite.expect(events == [.finished(provider: .antigravity, duration: 5.0, cost: 0.0, tokens: 73, project: "cool-app")],
                      "a completed Antigravity turn emits a finished event with duration, cost, tokens, and project")
         suite.expect(store.live.isEmpty, "the live turn is closed after completion")
+        suite.expect(store.records.allSatisfy { $0.cost == nil } && !store.records.isEmpty,
+                     "usage with unspecified model preserves cost as unavailable")
 
         // Model name extraction and pricing resolution
         var modelState = AgentLogState()
@@ -472,9 +474,29 @@ enum NotchAgentTests {
         suite.expect(AgentPricing.displayName(modelState.model) == "Gemini 3.8 Flash", "model display name formats Gemini models cleanly")
         suite.expect(AgentPricing.displayName("gemini-3.8-flash-high") == "Gemini 3.8 Flash", "gemini-3.8-flash-high formats cleanly")
         suite.expect(AgentPricing.price(for: modelState.model) != nil, "Gemini 3.8 Flash resolves to pricing table")
-        suite.expect(AgentPricing.price(for: "Gemini 3.8 Pro") != nil, "Gemini 3.8 Pro resolves to pricing table")
-        suite.expect(AgentPricing.price(for: "Gemini 2.5 Flash Lite") != nil, "Gemini 2.5 Flash Lite resolves to pricing table")
-        suite.expect(AgentPricing.price(for: "gemini-ultra") != nil, "Gemini Ultra resolves to pricing table")
+        suite.expect(AgentPricing.price(for: "gemini-3.8-flash")?.input == 0.75, "Gemini 3.8 Flash has published input price 0.75")
+        suite.expect(AgentPricing.price(for: "gemini-3.8-flash")?.output == 3.75, "Gemini 3.8 Flash has published output price 3.75")
+        suite.expect(AgentPricing.price(for: "gemini-3.8-flash")?.cacheRead == 0.075, "Gemini 3.8 Flash has published cache read price 0.075")
+        suite.expect(AgentPricing.price(for: "Gemini 3.8 Pro") == nil, "Gemini 3.8 Pro unsupported model remains unknown")
+        suite.expect(AgentPricing.price(for: "Gemini 2.5 Flash Lite") == nil, "Gemini 2.5 Flash Lite unsupported model remains unknown")
+        suite.expect(AgentPricing.price(for: "gemini-ultra") == nil, "Gemini Ultra unsupported model remains unknown")
+
+        // Canonical root relative filtering and session extraction
+        let symlinkedRoot = AgentLogRoot(provider: .antigravity, url: URL(fileURLWithPath: "/tmp/agent-data", isDirectory: true))
+        let transcriptPath = "/tmp/agent-data/conv-uuid-1234/.system_generated/logs/transcript.jsonl"
+        let chunkPath = "/tmp/agent-data/conv-uuid-1234/.system_generated/logs/chunks/0.jsonl"
+        suite.expect(AgentLogReader.isLog(transcriptPath, in: symlinkedRoot), "transcript under symlinked root is accepted as log")
+        suite.expect(!AgentLogReader.isLog(chunkPath, in: symlinkedRoot), "chunk logs under symlinked root are rejected")
+        suite.expect(AgentLogCursor.session(of: transcriptPath, provider: .antigravity, roots: [symlinkedRoot]) == "conv-uuid-1234",
+                     "session ID extracted correctly relative to canonical root")
+
+        let claudeUnderBrain = AgentLogRoot(provider: .claude, url: URL(fileURLWithPath: "/Users/user/brain/.claude/projects", isDirectory: true))
+        let claudeLogPath = "/Users/user/brain/.claude/projects/proj-1/session-abc.jsonl"
+        suite.expect(AgentLogReader.isLog(claudeLogPath, in: claudeUnderBrain), "claude log below a path containing brain is not discarded")
+
+        // Root discovery includes CLI, desktop, and IDE Antigravity roots
+        let antigravityRoots = AgentLogRoot.all().filter { $0.provider == .antigravity }
+        suite.expect(antigravityRoots.count == 3, "discovers all three Antigravity brain roots (desktop, IDE, and CLI)")
 
         // Mid-turn response opens turn if closed
         var midState = AgentLogState()

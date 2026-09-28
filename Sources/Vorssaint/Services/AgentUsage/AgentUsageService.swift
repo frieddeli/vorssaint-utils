@@ -310,8 +310,9 @@ final class AgentUsageService: ObservableObject {
                 if read(file.path, provider: file.provider) { changed = true }
             }
         } else {
-            for path in Set(paths) where AgentLogReader.isLog(path) {
-                guard let root = watchedRoots.first(where: { path.hasPrefix($0.url.path + "/") }) else { continue }
+            for path in Set(paths) {
+                guard let root = watchedRoots.first(where: { path.hasPrefix($0.url.path + "/") }),
+                      AgentLogReader.isLog(path, in: root) else { continue }
                 if read(path, provider: root.provider) { changed = true }
             }
         }
@@ -453,7 +454,9 @@ final class AgentUsageService: ObservableObject {
     private func checkBudget(_ snapshot: AgentUsageSnapshot) {
         guard store.reportsTransitions, let budget = NotchAgentSupport.dailyBudget() else { return }
         let today = Calendar.autoupdatingCurrent.startOfDay(for: snapshot.now)
-        let spent = snapshot.usage(.today).total.cost
+        let spent = snapshot.usage(.today).byProvider
+            .filter { $0.key != .antigravity }
+            .values.reduce(0.0) { $0 + $1.cost }
         guard spent >= budget, budgetDay != today else { return }
         budgetDay = today
         report(.budgetReached(spent: spent, budget: budget))
@@ -552,11 +555,9 @@ final class AgentUsageService: ObservableObject {
                 self.pricesFailed = false
                 self.pricesSaved = Date()
                 self.queue.async {
-                    guard self.readerSession == session else { return }
-                    guard let effective = AgentPriceList.newer(self.shippedPrices, list),
-                          effective == list else { return }
                     AgentPriceSource.save(data)
-                    guard AgentPricing.install(effective) else { return }
+                    guard self.readerSession == session,
+                          AgentPricing.install(AgentPriceList.newer(self.shippedPrices, list) ?? list) else { return }
                     self.store.reprice()
                     self.publish()
                 }

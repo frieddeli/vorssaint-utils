@@ -90,12 +90,12 @@ struct AgentPriceList: Equatable {
                               usOnlyMultiplier: usOnly)
     }
 
-    /// The newer of the list inside the app and the last one downloaded.
-    /// Strictly newer downloads win; equal dates keep the bundled list.
+    /// The newer of the list inside the app and the last one downloaded. On
+    /// the same day the download wins, since it may carry a correction.
     static func newer(_ shipped: AgentPriceList?, _ downloaded: AgentPriceList?) -> AgentPriceList? {
         guard let downloaded else { return shipped }
         guard let shipped else { return downloaded }
-        return downloaded.updated > shipped.updated ? downloaded : shipped
+        return downloaded.updated >= shipped.updated ? downloaded : shipped
     }
 
     private static func models(_ value: Any?, prefix: String?) -> [Model]? {

@@ -209,6 +209,8 @@ struct AgentLogRoot: Equatable {
     static func all(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [AgentLogRoot] {
         [(AgentProvider.claude, ".claude/projects"), (.claude, ".config/claude/projects"),
          (.codex, ".codex/sessions"), (.codex, ".codex/archived_sessions"),
+         (.antigravity, ".gemini/antigravity/brain"),
+         (.antigravity, ".gemini/antigravity-ide/brain"),
          (.antigravity, ".gemini/antigravity-cli/brain")].map { provider, path in
             AgentLogRoot(provider: provider, url: canonical(home.appending(path: path, directoryHint: .isDirectory)))
         }
@@ -244,22 +246,37 @@ final class AgentLogCursor {
     var state = AgentLogState()
     var modified = Date.distantPast
 
-    init(path: String, provider: AgentProvider) {
+    init(path: String, provider: AgentProvider, roots: [AgentLogRoot] = AgentLogRoot.all()) {
         self.path = path
         self.provider = provider
         let name = (path as NSString).lastPathComponent
         let parent = provider == .claude ? AgentLogCursor.parent(of: path) : nil
         self.parent = parent
         tracksTurns = provider == .claude ? parent == nil : (provider == .codex ? !name.contains("_") : true)
-        var session = ""
-        if provider == .antigravity {
-            let parts = path.split(separator: "/")
-            if let brainIndex = parts.firstIndex(of: "brain"), brainIndex + 1 < parts.count {
-                session = String(parts[brainIndex + 1])
-            }
-        }
+        let session = AgentLogCursor.session(of: path, provider: provider, roots: roots)
         self.session = session
         state.session = session
+    }
+
+    static func session(of path: String, provider: AgentProvider, roots: [AgentLogRoot] = AgentLogRoot.all()) -> String {
+        guard provider == .antigravity else { return "" }
+        if let root = roots.first(where: { $0.provider == .antigravity && path.hasPrefix($0.url.path + "/") }) {
+            let relative = String(path.dropFirst(root.url.path.count + 1))
+            if let first = relative.split(separator: "/").first, !first.isEmpty {
+                return String(first)
+            }
+        }
+        let parts = path.split(separator: "/")
+        if let brainIndex = parts.firstIndex(of: "brain"), brainIndex + 1 < parts.count {
+            return String(parts[brainIndex + 1])
+        }
+        if parts.count >= 2, (path as NSString).lastPathComponent == "transcript.jsonl" {
+            if let sgIndex = parts.firstIndex(of: ".system_generated"), sgIndex > 0 {
+                return String(parts[sgIndex - 1])
+            }
+            return String(parts[parts.count - 2])
+        }
+        return ""
     }
 
     func resetState() {
@@ -280,10 +297,22 @@ enum AgentLogReader {
     /// usage record; it is skipped rather than held in memory.
     static let maximumLine = 32 << 20
 
-    static func isLog(_ path: String) -> Bool {
+    static func isLog(_ path: String, in root: AgentLogRoot) -> Bool {
+        guard path.hasPrefix(root.url.path + "/") else { return false }
+        let relative = String(path.dropFirst(root.url.path.count + 1))
+        guard relative.hasSuffix(".jsonl") else { return false }
+        if root.provider == .antigravity {
+            return (relative as NSString).lastPathComponent == "transcript.jsonl"
+                && !relative.contains("/chunks/")
+        }
+        return true
+    }
+
+    static func isLog(_ path: String, provider: AgentProvider = .claude) -> Bool {
         guard path.hasSuffix(".jsonl") else { return false }
-        if path.contains(".gemini/antigravity-cli") || path.contains("/brain/") {
+        if provider == .antigravity {
             return (path as NSString).lastPathComponent == "transcript.jsonl"
+                && !path.contains("/chunks/")
         }
         return true
     }
@@ -297,7 +326,7 @@ enum AgentLogReader {
         for root in roots where root.exists {
             guard let enumerator = FileManager.default.enumerator(at: root.url, includingPropertiesForKeys: keys,
                                                                   options: [.skipsPackageDescendants]) else { continue }
-            for case let url as URL in enumerator where isLog(url.path) {
+            for case let url as URL in enumerator where isLog(url.path, in: root) {
                 guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
                       let modified = values.contentModificationDate, modified >= horizon else { continue }
                 let subagent = root.provider == .claude && AgentLogCursor.parent(of: url.path) != nil

@@ -41,6 +41,7 @@ enum AgentUsageReadTests {
         catch { suite.expect(false, "the streaming fixture creates its folder: \(error)"); return }
         let now = Date()
         let timestamp = now.timeIntervalSince1970
+        let isoDate = ISO8601DateFormatter().string(from: now)
         let cases: [(AgentProvider, [String])] = [
             (.claude, [
                 #"{"type":"user","timestamp":\#(timestamp),"sessionId":"s","message":{"content":"work"}}"#,
@@ -58,10 +59,10 @@ enum AgentUsageReadTests {
                 #"{"type":"event_msg","timestamp":\#(timestamp),"payload":{"type":"task_complete","duration_ms":20000}}"#
             ]),
             (.antigravity, [
-                #"{"step_index":1,"type":"USER_INPUT","status":"DONE","created_at":"2026-09-28T00:00:00Z","content":"work in /tmp/example"}"#,
-                #"{"step_index":2,"type":"PLANNER_RESPONSE","status":"RUNNING","created_at":"2026-09-28T00:00:01Z","thinking":"inspecting","tool_calls":[{"tool_name":"view_file","args":{"Cwd":"/tmp/example"}}]}"#,
-                #"{"step_index":3,"type":"GENERIC","status":"DONE","created_at":"2026-09-28T00:00:02Z","content":"file content"}"#,
-                #"{"step_index":4,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-28T00:00:03Z","content":"finished"}"#
+                #"{"step_index":1,"type":"USER_INPUT","status":"DONE","created_at":"\#(isoDate)","content":"work in /tmp/example"}"#,
+                #"{"step_index":2,"type":"PLANNER_RESPONSE","status":"RUNNING","created_at":"\#(isoDate)","thinking":"inspecting","tool_calls":[{"tool_name":"view_file","args":{"Cwd":"/tmp/example"}}]}"#,
+                #"{"step_index":3,"type":"GENERIC","status":"DONE","created_at":"\#(isoDate)","content":"file content"}"#,
+                #"{"step_index":4,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"\#(isoDate)","content":"finished"}"#
             ])
         ]
         for (provider, lines) in cases {
