@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vorssaint
 
 import Foundation
+import SQLite3
 
 enum NotchAgentTests {
     static func run(_ suite: TestSuite) {
@@ -16,6 +17,7 @@ enum NotchAgentTests {
         claudeParsing(suite)
         claudeTurns(suite)
         codexParsing(suite)
+        openCodeParsing(suite)
         timestamps(suite)
         summary(suite)
         AgentUsageSummaryCacheTests.run(suite)
@@ -435,6 +437,155 @@ enum NotchAgentTests {
                                                state: &aborted, now: now)
                         == [.turnEnded(AgentTimestamp.parse("2026-09-22T15:00:00.000Z"), completed: false, duration: 10.961)],
                      "an aborted turn ends without counting as finished")
+    }
+
+    // MARK: OpenCode logs
+
+    private static func openCodeParsing(_ suite: TestSuite) {
+        let now = Date(timeIntervalSince1970: 0)
+        var state = AgentLogState()
+
+        // 1. User turn began
+        let userMsg = line("""
+        {"session_id":"s_oc_1","time_created":1790088000,"directory":"/Users/me/code/backend","role":"user","parts":[{"type":"text","text":"Implement feature"}]}
+        """)
+        let userEntries = AgentLogParser.parseOpenCode(userMsg, state: &state, now: now)
+        let beganDate = Date(timeIntervalSince1970: 1_790_088_000)
+        suite.expect(userEntries == [.turnBegan(beganDate)], "a user message in OpenCode marks the turn began")
+
+        // 2. Assistant message in progress (tool-calls) with reported cost and exact tokens
+        let assistantActive = line("""
+        {"id":"msg_1","session_id":"s_oc_1","time_created":1790088005,"directory":"/Users/me/code/backend","role":"assistant","model_id":"stealth/ox-alpha","provider_id":"openrouter","cost":0.0042,"tokens":{"total":1250,"input":1000,"output":200,"reasoning":50,"cache":{"read":50,"write":0}},"finish":"tool-calls"}
+        """)
+        let activeEntries = AgentLogParser.parseOpenCode(assistantActive, state: &state, now: now)
+        guard case .usage(let key, let record, _)? = activeEntries.first(where: {
+            if case .usage = $0 { return true }
+            return false
+        }) else {
+            suite.expect(false, "an OpenCode assistant reply yields its usage")
+            return
+        }
+        suite.expect(key == "opencode:s_oc_1:msg_1" && record.model == "stealth/ox-alpha"
+                        && record.project == "backend" && record.session == "s_oc_1"
+                        && record.cost == 0.0042,
+                     "OpenCode uses exact reported cost and keeps project, session and model")
+        suite.expect(record.tokens == AgentTokens(input: 1000, cacheWrite: 0, cacheRead: 50, output: 200, reasoning: 50),
+                     "exact token breakdowns are parsed from OpenCode tokens dictionary")
+        let activeDate = Date(timeIntervalSince1970: 1_790_088_005)
+        suite.expect(activeEntries.contains(.turnActive(activeDate)),
+                     "an in-progress or tool-calling assistant message reports the turn active")
+
+        // 3. Assistant message completed (finish: stop)
+        let assistantStop = line("""
+        {"id":"msg_2","session_id":"s_oc_1","time_created":1790088020,"directory":"/Users/me/code/backend","role":"assistant","model_id":"stealth/ox-alpha","provider_id":"openrouter","cost":0.0015,"tokens":{"total":500,"input":400,"output":100,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"stop"}
+        """)
+        let stopEntries = AgentLogParser.parseOpenCode(assistantStop, state: &state, now: now)
+        let stopDate = Date(timeIntervalSince1970: 1_790_088_020)
+        suite.expect(stopEntries.contains(.turnEnded(stopDate, completed: true, duration: nil)),
+                     "a finished response emits .turnEnded with completion status")
+
+        // 4. Store application and event emission
+        let store = AgentUsageStore()
+        store.reportsTransitions = true
+        var storeEvents: [AgentUsageEvent] = []
+        for entries in [userEntries, activeEntries, stopEntries] {
+            storeEvents += store.apply(entries, file: "opencode.db#s_oc_1", provider: .opencode,
+                                       tracksTurns: true, modified: now, now: stopDate)
+        }
+        suite.expect(store.records.count == 2, "OpenCode records are stored in AgentUsageStore")
+        let totalCost = store.records.filter { $0.provider == .opencode }.compactMap(\.cost).reduce(0, +)
+        suite.expect(abs(totalCost - 0.0057) < 0.000001,
+                     "OpenCode total cost aggregates reported costs")
+        suite.expect(storeEvents == [.finished(provider: .opencode, duration: 20, cost: 0.0057,
+                                              tokens: 1750, project: "backend")],
+                     "OpenCode turn finish generates .finished usage event with accumulated turn cost and tokens")
+
+        // 5. Model pricing fallback: unpriced vs list price fallback
+        var fallbackState = AgentLogState()
+        let unpricedMsg = line("""
+        {"id":"msg_3","session_id":"s_oc_2","time_created":1790088030,"directory":"/Users/me/code/web","role":"assistant","model_id":"unknown-local-model","cost":0,"tokens":{"total":100,"input":80,"output":20,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"stop"}
+        """)
+        let unpricedEntries = AgentLogParser.parseOpenCode(unpricedMsg, state: &fallbackState, now: now)
+        if case .usage(_, let rec, _)? = unpricedEntries.first(where: { if case .usage = $0 { return true }; return false }) {
+            suite.expect(rec.cost == nil, "a zero cost for an unknown model is treated as unpriced rather than free")
+        } else {
+            suite.expect(false, "an unpriced response still records usage")
+        }
+
+        let pricedFallback = line("""
+        {"id":"msg_4","session_id":"s_oc_3","time_created":1790088040,"directory":"/Users/me/code/web","role":"assistant","model_id":"gpt-6-astra","cost":0,"tokens":{"total":100,"input":80,"output":20,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"stop"}
+        """)
+        let pricedEntries = AgentLogParser.parseOpenCode(pricedFallback, state: &fallbackState, now: now)
+        if case .usage(_, let rec, _)? = pricedEntries.first(where: { if case .usage = $0 { return true }; return false }) {
+            suite.expectClose(rec.cost ?? -1, 0.0018, "a zero cost with a listed model calculates from list price",
+                              tol: 0.000001)
+        } else {
+            suite.expect(false, "a listed model with zero reported cost calculates from price list")
+        }
+
+        // 6. Display names
+        suite.expect(AgentPricing.displayName("stealth/ox-alpha") == "Ox Alpha"
+                        && AgentPricing.displayName("deepseek/deepseek-chat") == "Deepseek Chat"
+                        && AgentPricing.displayName("deepseek-ai/deepseek-v3") == "Deepseek V3"
+                        && AgentPricing.displayName("openrouter/anthropic/claude-3-5-sonnet") == "Sonnet 3.5"
+                        && AgentPricing.displayName("google/gemini-2.5-pro") == "Gemini 2.5 Pro",
+                     "display names format provider models cleanly")
+
+        // 7. SQLite reader with temporary database
+        let tmpDir = FileManager.default.temporaryDirectory.appending(path: "vorss-opencode-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let dbPath = tmpDir.appending(path: "opencode.db").path
+
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK, let db else {
+            suite.expect(false, "temporary OpenCode database opens")
+            return
+        }
+        sqlite3_exec(db, """
+        CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        """, nil, nil, nil)
+        sqlite3_exec(db, """
+        INSERT INTO session VALUES ('s1', '/Users/me/code/app', 1790088000000, 1790088020000);
+        INSERT INTO message VALUES ('m1', 's1', 1790088000000, 1790088000000, '{"role":"user","parts":[{"type":"text","text":"hello"}]}');
+        INSERT INTO message VALUES ('m2', 's1', 1790088005000, 1790088005000, '{"role":"assistant","model_id":"stealth/ox-alpha","cost":0.001,"tokens":{"total":100,"input":80,"output":20,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"stop"}');
+        """, nil, nil, nil)
+        sqlite3_close(db)
+
+        let cursor = AgentLogCursor(path: dbPath, provider: .opencode)
+        var linesRead: [String] = []
+        AgentOpenCodeReader.readAppended(cursor) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
+        suite.expect(linesRead.count == 2 && cursor.offset == 1_790_088_005_000,
+                     "OpenCode reader retrieves messages in order and advances offset to latest timestamp")
+
+        // Incremental check: add message m3
+        var db2: OpaquePointer?
+        guard sqlite3_open(dbPath, &db2) == SQLITE_OK, let db2 else {
+            suite.expect(false, "re-opening OpenCode database")
+            return
+        }
+        sqlite3_exec(db2, """
+        INSERT INTO message VALUES ('m3', 's1', 1790088010000, 1790088010000, '{"role":"user","parts":[{"type":"text","text":"next"}]}');
+        """, nil, nil, nil)
+        sqlite3_close(db2)
+
+        linesRead.removeAll()
+        AgentOpenCodeReader.readAppended(cursor) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
+        suite.expect(linesRead.count == 1 && linesRead.first?.contains("m3") == true
+                        && cursor.offset == 1_790_088_010_000,
+                     "incremental read only returns messages created after previous offset")
+
+        // Cancellation check
+        linesRead.removeAll()
+        AgentOpenCodeReader.readAppended(cursor, shouldContinue: { false }) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
+        suite.expect(linesRead.isEmpty, "cancellation avoids reading entries")
     }
 
     private static func timestamps(_ suite: TestSuite) {
@@ -947,7 +1098,9 @@ enum NotchAgentTests {
         suite.expect(NotchAgentSupport.cards(in: defaults) == [.trend, .spend, .limits, .live, .models],
                      "the saved order ignores unknown and repeated cards and appends new ones")
         defaults.set(false, forKey: DefaultsKey.notchAgentsCodex)
-        suite.expect(NotchAgentSupport.providers(in: defaults) == [.claude], "an agent can be left out")
+        suite.expect(NotchAgentSupport.providers(in: defaults) == [.claude, .opencode], "an agent can be left out")
+        defaults.set(false, forKey: DefaultsKey.notchAgentsOpenCode)
+        suite.expect(NotchAgentSupport.providers(in: defaults) == [.claude], "multiple agents can be left out")
         defaults.set(false, forKey: DefaultsKey.notchAgentsFinishAlert)
         defaults.set(95.0, forKey: DefaultsKey.notchAgentsLimitThreshold)
         defaults.set(-4.0, forKey: DefaultsKey.notchAgentsDailyBudget)
@@ -956,6 +1109,7 @@ enum NotchAgentTests {
                      "alerts follow their switches and a budget must be positive")
 
         let keys = [DefaultsKey.notchAgentsEnabled, DefaultsKey.notchAgentsClaude, DefaultsKey.notchAgentsCodex,
+                    DefaultsKey.notchAgentsOpenCode,
                     DefaultsKey.notchAgentsCardOrder, DefaultsKey.notchAgentsHiddenCards, DefaultsKey.notchAgentsPeriod,
                     DefaultsKey.notchAgentsLimitDisplay, DefaultsKey.notchAgentsLiveActivity, DefaultsKey.notchAgentsReadout,
                     DefaultsKey.notchAgentsFinishAlert, DefaultsKey.notchAgentsFinishMinimum, DefaultsKey.notchAgentsLimitAlert,

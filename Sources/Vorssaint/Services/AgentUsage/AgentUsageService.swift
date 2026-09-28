@@ -252,6 +252,21 @@ final class AgentUsageService: ObservableObject {
         where working.contains(path) || now.timeIntervalSince(cursor.modified) < window {
             var info = stat()
             let exists = stat(path, &info) == 0
+            if cursor.provider == .opencode {
+                guard exists else {
+                    if read(path, provider: cursor.provider) { changed = true }
+                    continue
+                }
+                var walInfo = stat()
+                let walExists = stat(path + "-wal", &walInfo) == 0
+                let currentMod = max(
+                    Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1_000_000_000),
+                    walExists ? Date(timeIntervalSince1970: TimeInterval(walInfo.st_mtimespec.tv_sec) + TimeInterval(walInfo.st_mtimespec.tv_nsec) / 1_000_000_000) : .distantPast
+                )
+                guard currentMod > cursor.modified else { continue }
+                if read(path, provider: cursor.provider) { changed = true }
+                continue
+            }
             guard !exists || UInt64(max(0, info.st_size)) != cursor.offset
                     || UInt64(info.st_ino) != cursor.identity else { continue }
             if read(path, provider: cursor.provider) { changed = true }
@@ -279,10 +294,12 @@ final class AgentUsageService: ObservableObject {
             switch provider {
             case .claude: entries = AgentLogParser.parseClaude(line, state: &cursor.state, now: now)
             case .codex: entries = AgentLogParser.parseCodex(line, state: &cursor.state, now: now)
+            case .opencode: entries = AgentLogParser.parseOpenCode(line, state: &cursor.state, now: now)
             }
             guard !entries.isEmpty else { return }
             changed = true
-            let finished = store.apply(entries, file: path, provider: provider, tracksTurns: cursor.tracksTurns,
+            let turnFile = provider == .opencode && !cursor.state.session.isEmpty ? "\(path)#\(cursor.state.session)" : path
+            let finished = store.apply(entries, file: turnFile, provider: provider, tracksTurns: cursor.tracksTurns,
                                        parent: cursor.parent, modified: cursor.modified, now: now)
             finished.forEach(report)
         }
@@ -310,8 +327,9 @@ final class AgentUsageService: ObservableObject {
             }
         } else {
             for path in Set(paths) where AgentLogReader.isLog(path) {
-                guard let root = watchedRoots.first(where: { path.hasPrefix($0.url.path + "/") }) else { continue }
-                if read(path, provider: root.provider) { changed = true }
+                let actualPath = path.hasSuffix("-wal") ? String(path.dropLast(4)) : path
+                guard let root = watchedRoots.first(where: { actualPath.hasPrefix($0.url.path + "/") }) else { continue }
+                if read(actualPath, provider: root.provider) { changed = true }
             }
         }
         // Saved tool output and lines with nothing to keep do not change the

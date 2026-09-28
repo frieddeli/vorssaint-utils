@@ -10,6 +10,7 @@ extension AgentProvider {
         switch self {
         case .claude: return Color(red: 0.85, green: 0.47, blue: 0.34)
         case .codex: return Color(red: 0.49, green: 0.60, blue: 1.0)
+        case .opencode: return Color(red: 0.06, green: 0.73, blue: 0.51)
         }
     }
 }
@@ -371,18 +372,20 @@ private extension AgentProvider {
         switch self {
         case .claude: return [AgentClaudeAppUsage.bundleIdentifier]
         case .codex: return ["com.openai.codex", "com.openai.chat"]
+        case .opencode: return ["ai.opencode.app", "com.anomaly.opencode"]
         }
     }
 
     /// The menu bar images keep a margin; the spark's thin rays need more
     /// of the box than the knot to look the same size.
-    var markScale: CGFloat { self == .claude ? 1.45 : 1.2 }
+    var markScale: CGFloat { self == .claude ? 1.45 : (self == .opencode ? 1.25 : 1.2) }
 
     /// What those apps name the mark they show in the menu bar.
     var menuBarImageNames: [String] {
         switch self {
         case .claude: return ["TrayIconTemplate"]
         case .codex: return ["chatgptTemplate"]
+        case .opencode: return ["opencodeTemplate"]
         }
     }
 }

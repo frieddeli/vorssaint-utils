@@ -10,6 +10,7 @@ struct NotchAgentsSettingsControls: View {
     @ObservedObject private var usage = AgentUsageService.shared
     @AppStorage(DefaultsKey.notchAgentsClaude) private var claude = true
     @AppStorage(DefaultsKey.notchAgentsCodex) private var codex = true
+    @AppStorage(DefaultsKey.notchAgentsOpenCode) private var opencode = true
     @AppStorage(DefaultsKey.notchAgentsCardOrder) private var cardOrder = ""
     @AppStorage(DefaultsKey.notchAgentsHiddenCards) private var hiddenCards = ""
     @AppStorage(DefaultsKey.notchAgentsLimitDisplay) private var limitDisplay = NotchAgentLimitDisplay.remaining.rawValue
@@ -44,6 +45,7 @@ struct NotchAgentsSettingsControls: View {
                 .fixedSize(horizontal: false, vertical: true)
             providerRow(.claude, isOn: $claude)
             providerRow(.codex, isOn: $codex)
+            providerRow(.opencode, isOn: $opencode)
 
             Divider()
             Text(text.cardsTitle).font(.subheadline.weight(.medium))
@@ -79,7 +81,7 @@ struct NotchAgentsSettingsControls: View {
                 .padding(.leading, settingsRowTextInset)
                 NotchAgentStripSample(readout: NotchAgentReadout(rawValue: readout) ?? .elapsed,
                                       display: NotchAgentLimitDisplay(rawValue: limitDisplay) ?? .remaining,
-                                      provider: claude || !codex ? .claude : .codex)
+                                      provider: claude ? .claude : (codex ? .codex : .opencode))
                     .padding(.leading, settingsRowTextInset)
             }
 
@@ -205,9 +207,9 @@ struct NotchAgentsSettingsControls: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
-            // One agent stays on; turning the section off stops both.
+            // One agent stays on; turning the section off stops all.
             Toggle(provider.displayName, isOn: isOn).labelsHidden().toggleStyle(.switch)
-                .disabled(isOn.wrappedValue && !(claude && codex))
+                .disabled(isOn.wrappedValue && [claude, codex, opencode].filter { $0 }.count <= 1)
         }
     }
 

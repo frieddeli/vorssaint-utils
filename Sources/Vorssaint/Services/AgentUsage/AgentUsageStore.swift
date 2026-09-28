@@ -208,7 +208,8 @@ struct AgentLogRoot: Equatable {
     /// link elsewhere, as dotfile setups do, would otherwise never match.
     static func all(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [AgentLogRoot] {
         [(AgentProvider.claude, ".claude/projects"), (.claude, ".config/claude/projects"),
-         (.codex, ".codex/sessions"), (.codex, ".codex/archived_sessions")].map { provider, path in
+         (.codex, ".codex/sessions"), (.codex, ".codex/archived_sessions"),
+         (.opencode, ".local/share/opencode")].map { provider, path in
             AgentLogRoot(provider: provider, url: canonical(home.appending(path: path, directoryHint: .isDirectory)))
         }
     }
@@ -248,7 +249,7 @@ final class AgentLogCursor {
         let name = (path as NSString).lastPathComponent
         let parent = provider == .claude ? AgentLogCursor.parent(of: path) : nil
         self.parent = parent
-        tracksTurns = provider == .claude ? parent == nil : !name.contains("_")
+        tracksTurns = provider == .claude ? parent == nil : (provider == .codex ? !name.contains("_") : true)
     }
 
     /// Claude Code keeps a session's subagents in `<session>/subagents/`,
@@ -265,7 +266,11 @@ enum AgentLogReader {
     /// usage record; it is skipped rather than held in memory.
     static let maximumLine = 32 << 20
 
-    static func isLog(_ path: String) -> Bool { path.hasSuffix(".jsonl") }
+    static func isLog(_ path: String) -> Bool {
+        let name = (path as NSString).lastPathComponent
+        if name == "opencode.db" || name == "opencode.db-wal" { return true }
+        return path.hasSuffix(".jsonl")
+    }
 
     /// Log files changed since `horizon`, newest last so live turns settle
     /// on the most recent state. Subagents come after every session, so the
@@ -277,6 +282,8 @@ enum AgentLogReader {
             guard let enumerator = FileManager.default.enumerator(at: root.url, includingPropertiesForKeys: keys,
                                                                   options: [.skipsPackageDescendants]) else { continue }
             for case let url as URL in enumerator where isLog(url.path) {
+                // WAL files trigger refreshes but are not separate session logs
+                if url.lastPathComponent.hasSuffix("-wal") { continue }
                 guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
                       let modified = values.contentModificationDate, modified >= horizon else { continue }
                 let subagent = root.provider == .claude && AgentLogCursor.parent(of: url.path) != nil
@@ -292,6 +299,10 @@ enum AgentLogReader {
     static func readAppended(_ cursor: AgentLogCursor, shouldContinue: () -> Bool = { true },
                              line: (Data) -> Void) {
         guard shouldContinue() else { return }
+        if cursor.provider == .opencode {
+            AgentOpenCodeReader.readAppended(cursor, shouldContinue: shouldContinue, line: line)
+            return
+        }
         var info = stat()
         guard stat(cursor.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return }
         let size = UInt64(max(0, info.st_size))

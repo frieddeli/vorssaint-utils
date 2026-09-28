@@ -254,6 +254,101 @@ enum AgentLogParser {
             tokens: tokens, cost: priced.cost, savings: priced.savings), billable: billable)
     }
 
+    // MARK: OpenCode
+
+    static func parseOpenCode(_ line: Data, state: inout AgentLogState, now: Date) -> [AgentLogEntry] {
+        guard contains(line, #""role":""#) else { return [] }
+        guard let json = object(line), let role = json["role"] as? String else { return [] }
+        let id = json["id"] as? String ?? ""
+        if let session = json["session_id"] as? String, !session.isEmpty {
+            state.session = native(session)
+        }
+        let cwd = (json["path"] as? [String: Any])?["cwd"] as? String ?? json["directory"] as? String ?? ""
+        if !cwd.isEmpty {
+            state.project = projectName(cwd)
+        }
+
+        let timeCreated = (json["time"] as? [String: Any])?["created"] ?? json["time_created"]
+        let date = seconds(timeCreated) ?? now
+
+        switch role {
+        case "user":
+            var entries: [AgentLogEntry] = []
+            if state.turnOpen {
+                entries.append(.turnEnded(date, completed: true, duration: nil))
+            }
+            state.turnOpen = true
+            let userModel = json["model_id"] as? String
+                ?? json["modelID"] as? String
+                ?? (json["model"] as? [String: Any])?["modelID"] as? String
+                ?? (json["model"] as? [String: Any])?["id"] as? String
+            if let userModel, !userModel.isEmpty {
+                state.model = native(userModel)
+            }
+            entries.append(.turnBegan(date))
+            return entries
+
+        case "assistant":
+            let rawModel = json["model_id"] as? String
+                ?? json["modelID"] as? String
+                ?? (json["model"] as? [String: Any])?["modelID"] as? String
+                ?? (json["model"] as? [String: Any])?["id"] as? String
+            if let rawModel, !rawModel.isEmpty {
+                state.model = native(rawModel)
+            }
+            let tokensDict = json["tokens"] as? [String: Any] ?? [:]
+            let input = int(tokensDict["input"])
+            let output = int(tokensDict["output"])
+            let reasoning = int(tokensDict["reasoning"])
+            let cacheDict = tokensDict["cache"] as? [String: Any] ?? [:]
+            let cacheRead = int(cacheDict["read"])
+            let cacheWrite = int(cacheDict["write"])
+            let tokens = AgentTokens(input: input, cacheWrite: cacheWrite, cacheRead: cacheRead,
+                                     output: output, reasoning: reasoning)
+            let billable = AgentBillable(tokens: tokens)
+            let priced = AgentPricing.cost(billable, model: state.model)
+            let reportedCost = (json["cost"] as? NSNumber)?.doubleValue
+            let cost: Double?
+            if let reportedCost, reportedCost > 0 {
+                cost = reportedCost
+            } else if let calculated = priced.cost {
+                cost = calculated
+            } else {
+                cost = nil
+            }
+
+            let key = "opencode:\(state.session):\(id.isEmpty ? "\(date.timeIntervalSince1970)" : id)"
+            let record = AgentUsageRecord(
+                provider: .opencode, date: date, model: state.model, project: state.project,
+                session: state.session, tokens: tokens, cost: cost, savings: priced.savings
+            )
+            var entries: [AgentLogEntry] = []
+            if !state.turnOpen {
+                state.turnOpen = true
+                entries.append(.turnBegan(date))
+            }
+            entries.append(.usage(key: key, record: record, billable: billable))
+
+            let finish = json["finish"] as? String
+            let timeCompleted = (json["time"] as? [String: Any])?["completed"] ?? json["time_updated"]
+            var duration: TimeInterval?
+            if let completedDate = seconds(timeCompleted), completedDate >= date {
+                duration = completedDate.timeIntervalSince(date)
+            }
+
+            if finish == "stop" {
+                state.turnOpen = false
+                entries.append(.turnEnded(date, completed: true, duration: duration))
+            } else {
+                entries.append(.turnActive(date))
+            }
+            return entries
+
+        default:
+            return []
+        }
+    }
+
     /// Input counts include what came from the cache.
     static func codexTokens(_ usage: [String: Any]) -> AgentTokens {
         let input = int(usage["input_tokens"])
