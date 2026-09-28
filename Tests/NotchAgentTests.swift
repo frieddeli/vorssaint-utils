@@ -704,6 +704,31 @@ enum NotchAgentTests {
         } else {
             suite.expect(false, "opencode-symbol.svg could not be loaded as NSImage")
         }
+
+        // 14. Model name parsing & formatting
+        suite.expect(AgentPricing.displayName("nvidia/nemotron-3-super-120b-a12b") == "Nemotron 3 Super 120B A12B"
+                        && AgentPricing.displayName("muse-spark-1.3-contributor-free") == "Muse Spark 1.3 Contributor Free"
+                        && AgentPricing.displayName("moonshotai/kimi-k3") == "Kimi K3"
+                        && AgentPricing.displayName("anthropic/claude-3.5-sonnet") == "Sonnet 3.5"
+                        && AgentPricing.displayName("anthropic/claude-3.7-sonnet:thinking") == "Sonnet 3.7",
+                     "OpenCode models read without provider prefix, tags, and with proper casing")
+
+        // 15. Repricing keeps OpenCode's recorded cost
+        let beforeCost = store.records.first { $0.provider == .opencode }?.cost
+        suite.expect(beforeCost != nil, "OpenCode record has cost before reprice")
+        store.reprice()
+        suite.expect(store.records.first { $0.provider == .opencode }?.cost == beforeCost,
+                     "repricing keeps OpenCode's recorded cost")
+
+        // 16. Fallback model string representation in json["model"]
+        var modelFallbackState = AgentLogState()
+        let stringModelMsg = line(#"{"id":"ast_str_m","session_id":"s_sm","time_created":1790089400,"directory":"/p","role":"assistant","model":"anthropic/claude-3.5-sonnet","tokens":{"input":10,"output":5}}"#)
+        let stringModelEntries = AgentLogParser.parseOpenCode(stringModelMsg, state: &modelFallbackState, now: now)
+        if case .usage(_, let rec, _)? = stringModelEntries.first(where: { if case .usage = $0 { return true }; return false }) {
+            suite.expect(rec.model == "anthropic/claude-3.5-sonnet", "json['model'] as String is picked up as model")
+        } else {
+            suite.expect(false, "string model message yields usage")
+        }
     }
 
     private static func timestamps(_ suite: TestSuite) {

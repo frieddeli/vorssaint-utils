@@ -195,9 +195,11 @@ enum AgentPricing {
         var id = model.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if let range = id.range(of: "claude-") { id = String(id[range.lowerBound...]) }
         if let slash = id.lastIndex(of: "/") { id = String(id[id.index(after: slash)...]) }
-        for marker in ["@", "["] {
+        for marker in [":", "@", "[", "("] {
             if let index = id.firstIndex(of: Character(marker)) { id = String(id[..<index]) }
         }
+        id = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if id.contains(" ") { id = id.replacingOccurrences(of: " ", with: "-") }
         return id
     }
 
@@ -267,8 +269,9 @@ enum AgentPricing {
             parts.removeAll { $0.count >= 6 && $0.allSatisfy(\.isNumber) }
             parts.removeAll { $0.hasPrefix("v") && $0.dropFirst().first?.isNumber == true }
             parts.removeAll { $0 == "latest" }
-            let words = parts.filter { !$0.allSatisfy(\.isNumber) }
-            let version = parts.filter { $0.allSatisfy(\.isNumber) }.joined(separator: ".")
+            let words = parts.filter { !$0.allSatisfy({ $0.isNumber || $0 == "." }) }
+            let versions = parts.filter { $0.allSatisfy({ $0.isNumber || $0 == "." }) }
+            let version = versions.joined(separator: ".")
             let name = [words.first?.capitalized ?? "", version] + words.dropFirst().map(\.capitalized)
             return name.filter { !$0.isEmpty }.joined(separator: " ")
         }
@@ -294,7 +297,7 @@ enum AgentPricing {
             if ["gpt", "llm", "api", "ai"].contains(part) {
                 return part.uppercased()
             }
-            return part.prefix(1).uppercased() + part.dropFirst()
+            return part.capitalized
         }.joined(separator: " ")
     }
 }

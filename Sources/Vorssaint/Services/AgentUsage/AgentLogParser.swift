@@ -305,6 +305,7 @@ enum AgentLogParser {
                 ?? json["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["id"] as? String
+                ?? json["model"] as? String
             if let userModel, !userModel.isEmpty {
                 sessionState.model = native(userModel)
             }
@@ -320,6 +321,7 @@ enum AgentLogParser {
                 ?? json["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["id"] as? String
+                ?? json["model"] as? String
             if let rawModel, !rawModel.isEmpty {
                 sessionState.model = native(rawModel)
             }
@@ -336,10 +338,10 @@ enum AgentLogParser {
             let priced = AgentPricing.cost(billable, model: sessionState.model)
             let reportedCost = (json["cost"] as? NSNumber)?.doubleValue
             let cost: Double?
-            if let reportedCost, reportedCost > 0 {
-                cost = reportedCost
-            } else if let calculated = priced.cost {
+            if let calculated = priced.cost {
                 cost = calculated
+            } else if let reportedCost, reportedCost > 0 {
+                cost = reportedCost
             } else {
                 cost = nil
             }
