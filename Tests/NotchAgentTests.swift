@@ -481,8 +481,8 @@ enum NotchAgentTests {
         """)
         let stopEntries = AgentLogParser.parseOpenCode(assistantStop, state: &state, now: now)
         let stopDate = Date(timeIntervalSince1970: 1_790_088_020)
-        suite.expect(stopEntries.contains(.turnEnded(stopDate, completed: true, duration: nil)),
-                     "a finished response emits .turnEnded with completion status")
+        suite.expect(stopEntries.contains(.turnEnded(stopDate, completed: true, duration: 20)),
+                     "a finished response computes duration from user turn start")
 
         // 4. Store application and event emission
         let store = AgentUsageStore()
@@ -586,6 +586,69 @@ enum NotchAgentTests {
             linesRead.append(String(decoding: data, as: UTF8.self))
         }
         suite.expect(linesRead.isEmpty, "cancellation avoids reading entries")
+
+        // 8. Multi-session turn concurrency and isolation
+        var multiState = AgentLogState()
+        let sAUser = line(#"{"session_id":"s_A","time_created":1790089000,"directory":"/projA","role":"user","parts":[{"type":"text","text":"A"}]}"#)
+        let sBUser = line(#"{"session_id":"s_B","time_created":1790089005,"directory":"/projB","role":"user","parts":[{"type":"text","text":"B"}]}"#)
+        let entriesA1 = AgentLogParser.parseOpenCode(sAUser, state: &multiState, now: now)
+        let entriesB1 = AgentLogParser.parseOpenCode(sBUser, state: &multiState, now: now)
+        suite.expect(entriesA1 == [.turnBegan(Date(timeIntervalSince1970: 1_790_089_000))],
+                     "session A begins its turn")
+        suite.expect(entriesB1 == [.turnBegan(Date(timeIntervalSince1970: 1_790_089_005))],
+                     "session B begins its turn without ending session A's turn")
+
+        let sAStop = line(#"{"id":"mA","session_id":"s_A","time_created":1790089020,"directory":"/projA","role":"assistant","cost":0.002,"tokens":{"total":100,"input":80,"output":20},"finish":"stop"}"#)
+        let entriesA2 = AgentLogParser.parseOpenCode(sAStop, state: &multiState, now: now)
+        suite.expect(entriesA2.contains(.turnEnded(Date(timeIntervalSince1970: 1_790_089_020), completed: true, duration: 20)),
+                     "session A ends with duration calculated from session A start")
+        suite.expect(multiState.openCodeSessions["s_B"]?.turnOpen == true,
+                     "session B remains open while session A completes")
+
+        let sBStop = line(#"{"id":"mB","session_id":"s_B","time_created":1790089035,"directory":"/projB","role":"assistant","cost":0.003,"tokens":{"total":200,"input":150,"output":50},"finish":"stop"}"#)
+        let entriesB2 = AgentLogParser.parseOpenCode(sBStop, state: &multiState, now: now)
+        suite.expect(entriesB2.contains(.turnEnded(Date(timeIntervalSince1970: 1_790_089_035), completed: true, duration: 30)),
+                     "session B ends with duration calculated from session B start")
+        suite.expect(multiState.openCodeSessions["s_B"]?.turnOpen == false,
+                     "session B is now closed")
+
+        // 9. Cost preservation when assistant rows are updated in place
+        let updateStore = AgentUsageStore()
+        var uState = AgentLogState()
+        let msgInitial = line(#"{"id":"m_up","session_id":"s_u","time_created":1790089100,"directory":"/p","role":"assistant","model_id":"stealth/ox-alpha","cost":0.002,"tokens":{"total":100,"input":80,"output":20}}"#)
+        updateStore.apply(AgentLogParser.parseOpenCode(msgInitial, state: &uState, now: now),
+                          file: "db#s_u", provider: .opencode, tracksTurns: true, modified: now)
+        suite.expect(updateStore.records.first?.cost == 0.002, "initial reported cost is recorded")
+
+        let msgMoreTokens = line(#"{"id":"m_up","session_id":"s_u","time_created":1790089100,"time_updated":1790089105,"directory":"/p","role":"assistant","model_id":"stealth/ox-alpha","cost":0.0035,"tokens":{"total":200,"input":150,"output":50}}"#)
+        updateStore.apply(AgentLogParser.parseOpenCode(msgMoreTokens, state: &uState, now: now),
+                          file: "db#s_u", provider: .opencode, tracksTurns: true, modified: now)
+        suite.expect(updateStore.records.count == 1 && updateStore.records.first?.cost == 0.0035
+                        && updateStore.records.first?.tokens.total == 200,
+                     "updating row with more tokens updates and preserves reported cost")
+
+        let msgFinalCost = line(#"{"id":"m_up","session_id":"s_u","time_created":1790089100,"time_updated":1790089110,"directory":"/p","role":"assistant","model_id":"stealth/ox-alpha","cost":0.004,"tokens":{"total":200,"input":150,"output":50},"finish":"stop"}"#)
+        updateStore.apply(AgentLogParser.parseOpenCode(msgFinalCost, state: &uState, now: now),
+                          file: "db#s_u", provider: .opencode, tracksTurns: true, modified: now)
+        suite.expect(updateStore.records.count == 1 && updateStore.records.first?.cost == 0.004,
+                     "final cost adjustment with identical tokens preserves reported cost")
+
+        // 10. WAL modification discovery
+        let walDir = FileManager.default.temporaryDirectory.appending(path: "vorss-wal-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: walDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: walDir) }
+        let root = AgentLogRoot.canonical(walDir)
+        let oldDb = root.appending(path: "opencode.db")
+        let recentWal = root.appending(path: "opencode.db-wal")
+        FileManager.default.createFile(atPath: oldDb.path, contents: Data())
+        FileManager.default.createFile(atPath: recentWal.path, contents: Data())
+        let oldDate = Date().addingTimeInterval(-14 * 7 * 86_400)
+        try? FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: oldDb.path)
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: recentWal.path)
+        let discovered = AgentLogReader.discover([AgentLogRoot(provider: .opencode, url: root)],
+                                                since: Date().addingTimeInterval(-13 * 7 * 86_400))
+        suite.expect(discovered.map(\.path) == [oldDb.path],
+                     "an OpenCode database whose main file is older than horizon is admitted when its WAL was recently modified")
     }
 
     private static func timestamps(_ suite: TestSuite) {

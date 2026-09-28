@@ -249,7 +249,7 @@ final class AgentUsageService: ObservableObject {
         let working = Set(store.turns.keys).union(store.waiting.keys)
         var changed = false
         for (path, cursor) in cursors
-        where working.contains(path) || now.timeIntervalSince(cursor.modified) < window {
+        where working.contains(path) || working.contains(where: { $0.hasPrefix(path + "#") }) || now.timeIntervalSince(cursor.modified) < window {
             var info = stat()
             let exists = stat(path, &info) == 0
             if cursor.provider == .opencode {

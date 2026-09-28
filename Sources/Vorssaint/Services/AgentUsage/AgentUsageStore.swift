@@ -101,7 +101,15 @@ final class AgentUsageStore {
     @discardableResult
     func forget(file: String) -> Bool {
         waiting[file] = nil
-        return turns.removeValue(forKey: file) != nil
+        var removed = turns.removeValue(forKey: file) != nil
+        for key in turns.keys where key.hasPrefix(file + "#") {
+            turns.removeValue(forKey: key)
+            removed = true
+        }
+        for key in waiting.keys where key.hasPrefix(file + "#") {
+            waiting.removeValue(forKey: key)
+        }
+        return removed
     }
 
     /// `file` names the log whose turn the response counts toward. A
@@ -113,7 +121,20 @@ final class AgentUsageStore {
         if let position = index[key] {
             let old = records[position]
             let merged = old.tokens.merged(with: record.tokens)
-            guard merged != old.tokens else { return }
+            if merged == old.tokens {
+                if record.provider == .opencode, let reported = record.cost, reported != old.cost {
+                    summary.recordChanged(at: position, previous: old)
+                    let extra = reported - (old.cost ?? 0)
+                    records[position].cost = reported
+                    if let file, var turn = turns[file] ?? waiting[file],
+                       record.date >= turn.started.addingTimeInterval(-1) {
+                        waiting[file] = nil
+                        turn.cost += extra
+                        turns[file] = turn
+                    }
+                }
+                return
+            }
             summary.recordChanged(at: position, previous: old)
             var combined = billables[position]
             combined.tokens = merged
@@ -122,15 +143,21 @@ final class AgentUsageStore {
             combined.fast = combined.fast || billable.fast
             combined.domestic = combined.domestic || billable.domestic
             let priced = AgentPricing.cost(combined, model: old.model)
+            let newCost: Double?
+            if record.provider == .opencode {
+                newCost = record.cost ?? old.cost ?? priced.cost
+            } else {
+                newCost = priced.cost
+            }
             delta = AgentTokens(input: merged.input - old.tokens.input,
                                 cacheWrite: merged.cacheWrite - old.tokens.cacheWrite,
                                 cacheRead: merged.cacheRead - old.tokens.cacheRead,
                                 output: merged.output - old.tokens.output,
                                 reasoning: merged.reasoning - old.tokens.reasoning)
-            extra = (priced.cost ?? 0) - (old.cost ?? 0)
+            extra = (newCost ?? 0) - (old.cost ?? 0)
             billables[position] = combined
             records[position].tokens = merged
-            records[position].cost = priced.cost
+            records[position].cost = newCost
             records[position].savings = priced.savings
         } else {
             summary.recordChanged(at: records.count, previous: nil)
@@ -284,8 +311,17 @@ enum AgentLogReader {
             for case let url as URL in enumerator where isLog(url.path) {
                 // WAL files trigger refreshes but are not separate session logs
                 if url.lastPathComponent.hasSuffix("-wal") { continue }
-                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
-                      let modified = values.contentModificationDate, modified >= horizon else { continue }
+                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
+                var modified = values.contentModificationDate ?? .distantPast
+                if root.provider == .opencode {
+                    var walInfo = stat()
+                    if stat(url.path + "-wal", &walInfo) == 0 {
+                        let walDate = Date(timeIntervalSince1970: TimeInterval(walInfo.st_mtimespec.tv_sec)
+                                           + TimeInterval(walInfo.st_mtimespec.tv_nsec) / 1_000_000_000)
+                        modified = max(modified, walDate)
+                    }
+                }
+                guard modified >= horizon else { continue }
                 let subagent = root.provider == .claude && AgentLogCursor.parent(of: url.path) != nil
                 found.append((url.path, root.provider, modified, subagent))
             }

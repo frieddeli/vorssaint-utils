@@ -30,6 +30,16 @@ struct AgentLogState: Equatable {
     var lastTotal: AgentTokens?
     /// Codex runs the thread on the fast tier, which bills at a premium.
     var fast = false
+    /// OpenCode stores all sessions in one database, tracking per-session state.
+    var openCodeSessions: [String: OpenCodeSessionState] = [:]
+}
+
+/// Per-session turn and model tracking for OpenCode databases.
+struct OpenCodeSessionState: Equatable {
+    var project = ""
+    var model = ""
+    var turnOpen = false
+    var turnStarted: Date?
 }
 
 enum AgentLogParser {
@@ -260,12 +270,15 @@ enum AgentLogParser {
         guard contains(line, #""role":""#) else { return [] }
         guard let json = object(line), let role = json["role"] as? String else { return [] }
         let id = json["id"] as? String ?? ""
-        if let session = json["session_id"] as? String, !session.isEmpty {
-            state.session = native(session)
-        }
+        let session = json["session_id"] as? String ?? ""
+        let sessionID = session.isEmpty ? state.session : native(session)
+        state.session = sessionID
+
+        var sessionState = state.openCodeSessions[sessionID] ?? OpenCodeSessionState()
+
         let cwd = (json["path"] as? [String: Any])?["cwd"] as? String ?? json["directory"] as? String ?? ""
         if !cwd.isEmpty {
-            state.project = projectName(cwd)
+            sessionState.project = projectName(cwd)
         }
 
         let timeCreated = (json["time"] as? [String: Any])?["created"] ?? json["time_created"]
@@ -274,17 +287,23 @@ enum AgentLogParser {
         switch role {
         case "user":
             var entries: [AgentLogEntry] = []
-            if state.turnOpen {
-                entries.append(.turnEnded(date, completed: true, duration: nil))
+            if sessionState.turnOpen {
+                let duration = sessionState.turnStarted.map { max(0, date.timeIntervalSince($0)) }
+                entries.append(.turnEnded(date, completed: true, duration: duration))
             }
-            state.turnOpen = true
+            sessionState.turnOpen = true
+            sessionState.turnStarted = date
             let userModel = json["model_id"] as? String
                 ?? json["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["id"] as? String
             if let userModel, !userModel.isEmpty {
-                state.model = native(userModel)
+                sessionState.model = native(userModel)
             }
+            state.openCodeSessions[sessionID] = sessionState
+            state.project = sessionState.project
+            state.model = sessionState.model
+            state.turnOpen = true
             entries.append(.turnBegan(date))
             return entries
 
@@ -294,7 +313,7 @@ enum AgentLogParser {
                 ?? (json["model"] as? [String: Any])?["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["id"] as? String
             if let rawModel, !rawModel.isEmpty {
-                state.model = native(rawModel)
+                sessionState.model = native(rawModel)
             }
             let tokensDict = json["tokens"] as? [String: Any] ?? [:]
             let input = int(tokensDict["input"])
@@ -306,7 +325,7 @@ enum AgentLogParser {
             let tokens = AgentTokens(input: input, cacheWrite: cacheWrite, cacheRead: cacheRead,
                                      output: output, reasoning: reasoning)
             let billable = AgentBillable(tokens: tokens)
-            let priced = AgentPricing.cost(billable, model: state.model)
+            let priced = AgentPricing.cost(billable, model: sessionState.model)
             let reportedCost = (json["cost"] as? NSNumber)?.doubleValue
             let cost: Double?
             if let reportedCost, reportedCost > 0 {
@@ -317,14 +336,15 @@ enum AgentLogParser {
                 cost = nil
             }
 
-            let key = "opencode:\(state.session):\(id.isEmpty ? "\(date.timeIntervalSince1970)" : id)"
+            let key = "opencode:\(sessionID):\(id.isEmpty ? "\(date.timeIntervalSince1970)" : id)"
             let record = AgentUsageRecord(
-                provider: .opencode, date: date, model: state.model, project: state.project,
-                session: state.session, tokens: tokens, cost: cost, savings: priced.savings
+                provider: .opencode, date: date, model: sessionState.model, project: sessionState.project,
+                session: sessionID, tokens: tokens, cost: cost, savings: priced.savings
             )
             var entries: [AgentLogEntry] = []
-            if !state.turnOpen {
-                state.turnOpen = true
+            if !sessionState.turnOpen {
+                sessionState.turnOpen = true
+                sessionState.turnStarted = date
                 entries.append(.turnBegan(date))
             }
             entries.append(.usage(key: key, record: record, billable: billable))
@@ -334,14 +354,21 @@ enum AgentLogParser {
             var duration: TimeInterval?
             if let completedDate = seconds(timeCompleted), completedDate >= date {
                 duration = completedDate.timeIntervalSince(date)
+            } else if let turnStarted = sessionState.turnStarted, date >= turnStarted {
+                duration = date.timeIntervalSince(turnStarted)
             }
 
             if finish == "stop" {
-                state.turnOpen = false
+                sessionState.turnOpen = false
+                sessionState.turnStarted = nil
                 entries.append(.turnEnded(date, completed: true, duration: duration))
             } else {
                 entries.append(.turnActive(date))
             }
+            state.openCodeSessions[sessionID] = sessionState
+            state.project = sessionState.project
+            state.model = sessionState.model
+            state.turnOpen = sessionState.turnOpen
             return entries
 
         default:

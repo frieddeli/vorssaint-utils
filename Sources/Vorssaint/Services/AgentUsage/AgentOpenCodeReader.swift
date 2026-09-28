@@ -49,7 +49,7 @@ enum AgentOpenCodeReader {
         FROM message m
         JOIN session s ON m.session_id = s.id
         WHERE m.time_created > ? OR m.time_updated > ?
-        ORDER BY m.time_created ASC
+        ORDER BY max(m.time_created, COALESCE(m.time_updated, m.time_created)) ASC
         """
 
         var stmt: OpaquePointer?
