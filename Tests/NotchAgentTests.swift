@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vorssaint
 
 import Foundation
+import AppKit
 import SQLite3
 
 enum NotchAgentTests {
@@ -580,6 +581,23 @@ enum NotchAgentTests {
                         && cursor.offset == 1_790_088_010_000,
                      "incremental read only returns messages created after previous offset")
 
+        // User message metadata updates (e.g. summary diffs) are ignored on incremental reads
+        var db3: OpaquePointer?
+        guard sqlite3_open(dbPath, &db3) == SQLITE_OK, let db3 else {
+            suite.expect(false, "re-opening OpenCode database for user update test")
+            return
+        }
+        sqlite3_exec(db3, """
+        UPDATE message SET time_updated = 1790088015000, data = '{"role":"user","summary":{"diffs":[]}}' WHERE id = 'm3';
+        """, nil, nil, nil)
+        sqlite3_close(db3)
+
+        linesRead.removeAll()
+        AgentOpenCodeReader.readAppended(cursor) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
+        suite.expect(linesRead.isEmpty, "incremental read ignores subsequent updates to user message metadata")
+
         // Cancellation check
         linesRead.removeAll()
         AgentOpenCodeReader.readAppended(cursor, shouldContinue: { false }) { data in
@@ -649,6 +667,43 @@ enum NotchAgentTests {
                                                 since: Date().addingTimeInterval(-13 * 7 * 86_400))
         suite.expect(discovered.map(\.path) == [oldDb.path],
                      "an OpenCode database whose main file is older than horizon is admitted when its WAL was recently modified")
+
+        // 11. User message update after assistant finish does not re-open turn
+        var postFinishState = AgentLogState()
+        let uMsg = line(#"{"id":"usr_1","session_id":"s_pf","time_created":1790089200,"directory":"/p","role":"user","parts":[{"type":"text","text":"go"}]}"#)
+        let aMsg = line(#"{"id":"ast_1","parentID":"usr_1","session_id":"s_pf","time_created":1790089205,"directory":"/p","role":"assistant","finish":"stop"}"#)
+        _ = AgentLogParser.parseOpenCode(uMsg, state: &postFinishState, now: now)
+        let stopParsed = AgentLogParser.parseOpenCode(aMsg, state: &postFinishState, now: now)
+        suite.expect(stopParsed.contains(.turnEnded(Date(timeIntervalSince1970: 1_790_089_205), completed: true, duration: 5)),
+                     "assistant finishes the turn")
+        suite.expect(postFinishState.openCodeSessions["s_pf"]?.turnOpen == false, "turn is closed")
+
+        // Simulate OpenCode updating usr_1 with summary diffs after assistant finished
+        let uMsgUpdated = line(#"{"id":"usr_1","session_id":"s_pf","time_created":1790089200,"time_updated":1790089206,"directory":"/p","role":"user","summary":{"diffs":[]}}"#)
+        let updateParsed = AgentLogParser.parseOpenCode(uMsgUpdated, state: &postFinishState, now: now)
+        suite.expect(updateParsed.isEmpty, "re-reading updated user message does not emit events")
+        suite.expect(postFinishState.openCodeSessions["s_pf"]?.turnOpen == false, "turn remains closed after user message update")
+
+        // 12. Aborted assistant turn (Ctrl+C / MessageAbortedError) ends turn with completed: false
+        var abortState = AgentLogState()
+        let uMsgAbort = line(#"{"id":"usr_ab","session_id":"s_ab","time_created":1790089300,"directory":"/p","role":"user"}"#)
+        _ = AgentLogParser.parseOpenCode(uMsgAbort, state: &abortState, now: now)
+        suite.expect(abortState.openCodeSessions["s_ab"]?.turnOpen == true, "turn opened")
+
+        let aMsgAbort = line(#"{"id":"ast_ab","parentID":"usr_ab","session_id":"s_ab","time_created":1790089305,"directory":"/p","role":"assistant","error":{"name":"MessageAbortedError","data":{"message":"Aborted"}}}"#)
+        let abortParsed = AgentLogParser.parseOpenCode(aMsgAbort, state: &abortState, now: now)
+        suite.expect(abortParsed.contains(.turnEnded(Date(timeIntervalSince1970: 1_790_089_305), completed: false, duration: 5)),
+                     "aborted turn ends with completed: false")
+        suite.expect(abortState.openCodeSessions["s_ab"]?.turnOpen == false, "turn is closed after abort")
+
+        // 13. OpenCode symbol SVG asset
+        let svgURL = URL(fileURLWithPath: "Resources/Images/opencode-symbol.svg")
+        suite.expect(FileManager.default.fileExists(atPath: svgURL.path), "opencode-symbol.svg exists in Resources/Images")
+        if let image = NSImage(contentsOf: svgURL) {
+            suite.expect(image.size.width > 0 && image.size.height > 0, "opencode-symbol.svg loads as a valid image")
+        } else {
+            suite.expect(false, "opencode-symbol.svg could not be loaded as NSImage")
+        }
     }
 
     private static func timestamps(_ suite: TestSuite) {

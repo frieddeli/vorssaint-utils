@@ -48,8 +48,8 @@ enum AgentOpenCodeReader {
         SELECT m.id, m.session_id, m.time_created, m.time_updated, s.directory, m.data
         FROM message m
         JOIN session s ON m.session_id = s.id
-        WHERE m.time_created > ? OR m.time_updated > ?
-        ORDER BY max(m.time_created, COALESCE(m.time_updated, m.time_created)) ASC
+        WHERE m.time_created > ? OR (m.time_updated > ? AND m.data NOT LIKE '%"role":"user"%')
+        ORDER BY m.time_created ASC, m.time_updated ASC
         """
 
         var stmt: OpaquePointer?

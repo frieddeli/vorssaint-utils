@@ -350,6 +350,15 @@ enum AgentMarks {
     }
 
     private static func lookUp(_ provider: AgentProvider) -> Mark? {
+        if provider == .opencode {
+            if let url = Bundle.main.url(forResource: "opencode-symbol", withExtension: "svg", subdirectory: "Images") ??
+                         Bundle.main.url(forResource: "opencode-symbol", withExtension: "svg") ??
+                         (FileManager.default.fileExists(atPath: "Resources/Images/opencode-symbol.svg") ? URL(fileURLWithPath: "Resources/Images/opencode-symbol.svg") : nil),
+               let image = NSImage(contentsOf: url) {
+                image.isTemplate = true
+                return .template(image)
+            }
+        }
         for identifier in provider.appIdentifiers {
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) else { continue }
             if let bundle = Bundle(url: url) {
@@ -372,7 +381,13 @@ private extension AgentProvider {
         switch self {
         case .claude: return [AgentClaudeAppUsage.bundleIdentifier]
         case .codex: return ["com.openai.codex", "com.openai.chat"]
-        case .opencode: return ["ai.opencode.app", "com.anomaly.opencode"]
+        case .opencode: return [
+            "ai.opencode.desktop",
+            "ai.opencode.desktop.beta",
+            "ai.opencode.desktop.dev",
+            "ai.opencode.app",
+            "com.anomaly.opencode"
+        ]
         }
     }
 

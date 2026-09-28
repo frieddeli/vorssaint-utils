@@ -40,6 +40,8 @@ struct OpenCodeSessionState: Equatable {
     var model = ""
     var turnOpen = false
     var turnStarted: Date?
+    var lastUserMessageID = ""
+    var completedUserMessageIDs: Set<String> = []
 }
 
 enum AgentLogParser {
@@ -286,6 +288,12 @@ enum AgentLogParser {
 
         switch role {
         case "user":
+            if !id.isEmpty {
+                if sessionState.lastUserMessageID == id || sessionState.completedUserMessageIDs.contains(id) {
+                    return []
+                }
+                sessionState.lastUserMessageID = id
+            }
             var entries: [AgentLogEntry] = []
             if sessionState.turnOpen {
                 let duration = sessionState.turnStarted.map { max(0, date.timeIntervalSince($0)) }
@@ -350,18 +358,30 @@ enum AgentLogParser {
             entries.append(.usage(key: key, record: record, billable: billable))
 
             let finish = json["finish"] as? String
+            let hasError = json["error"] != nil
+            let parentID = json["parentID"] as? String ?? ""
+
             let timeCompleted = (json["time"] as? [String: Any])?["completed"] ?? json["time_updated"]
             var duration: TimeInterval?
-            if let completedDate = seconds(timeCompleted), completedDate >= date {
+            if let turnStarted = sessionState.turnStarted {
+                let end = seconds(timeCompleted) ?? date
+                if end >= turnStarted {
+                    duration = end.timeIntervalSince(turnStarted)
+                }
+            } else if let completedDate = seconds(timeCompleted), completedDate >= date {
                 duration = completedDate.timeIntervalSince(date)
-            } else if let turnStarted = sessionState.turnStarted, date >= turnStarted {
-                duration = date.timeIntervalSince(turnStarted)
             }
 
-            if finish == "stop" {
+            if finish == "stop" || finish == "abort" || finish == "end_turn" || hasError {
                 sessionState.turnOpen = false
                 sessionState.turnStarted = nil
-                entries.append(.turnEnded(date, completed: true, duration: duration))
+                if !parentID.isEmpty {
+                    if sessionState.completedUserMessageIDs.count > 50 {
+                        sessionState.completedUserMessageIDs.removeFirst()
+                    }
+                    sessionState.completedUserMessageIDs.insert(parentID)
+                }
+                entries.append(.turnEnded(date, completed: !hasError && finish != "abort", duration: duration))
             } else {
                 entries.append(.turnActive(date))
             }
