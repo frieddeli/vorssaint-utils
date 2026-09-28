@@ -729,6 +729,22 @@ enum NotchAgentTests {
         } else {
             suite.expect(false, "string model message yields usage")
         }
+
+        // 17. Completion timestamp uses completed/updated time, and emits .finished event on store
+        var finishDateState = AgentLogState()
+        let uMsg17 = line(#"{"id":"u17","session_id":"s17","time_created":1790089400,"directory":"/p","role":"user"}"#)
+        let aMsg17 = line(#"{"id":"a17","parentID":"u17","session_id":"s17","time_created":1790089405,"time_updated":1790089425,"time":{"completed":1790089425000},"directory":"/p","role":"assistant","cost":0.01,"tokens":{"total":500,"input":400,"output":100},"finish":"stop"}"#)
+        let store17 = AgentUsageStore()
+        store17.reportsTransitions = true
+        let uEntries = AgentLogParser.parseOpenCode(uMsg17, state: &finishDateState, now: now)
+        _ = store17.apply(uEntries, file: "db#s17", provider: .opencode, tracksTurns: true, modified: now, now: now)
+        let aEntries = AgentLogParser.parseOpenCode(aMsg17, state: &finishDateState, now: now)
+        suite.expect(aEntries.contains(.turnEnded(Date(timeIntervalSince1970: 1_790_089_425), completed: true, duration: 25)),
+                     "completion date uses time.completed timestamp")
+        let appliedEvents = store17.apply(aEntries, file: "db#s17", provider: .opencode, tracksTurns: true, modified: now,
+                                          now: Date(timeIntervalSince1970: 1_790_089_425))
+        suite.expect(appliedEvents == [.finished(provider: .opencode, duration: 25, cost: 0.01, tokens: 500, project: "p")],
+                     "store emits .finished event when OpenCode assistant turn stops")
     }
 
     private static func timestamps(_ suite: TestSuite) {

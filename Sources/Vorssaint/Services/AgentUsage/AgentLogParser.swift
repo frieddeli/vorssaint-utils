@@ -364,14 +364,14 @@ enum AgentLogParser {
             let parentID = json["parentID"] as? String ?? ""
 
             let timeCompleted = (json["time"] as? [String: Any])?["completed"] ?? json["time_updated"]
+            let endDate = seconds(timeCompleted) ?? date
             var duration: TimeInterval?
             if let turnStarted = sessionState.turnStarted {
-                let end = seconds(timeCompleted) ?? date
-                if end >= turnStarted {
-                    duration = end.timeIntervalSince(turnStarted)
+                if endDate >= turnStarted {
+                    duration = endDate.timeIntervalSince(turnStarted)
                 }
-            } else if let completedDate = seconds(timeCompleted), completedDate >= date {
-                duration = completedDate.timeIntervalSince(date)
+            } else if endDate >= date {
+                duration = endDate.timeIntervalSince(date)
             }
 
             if finish == "stop" || finish == "abort" || finish == "end_turn" || hasError {
@@ -383,7 +383,7 @@ enum AgentLogParser {
                     }
                     sessionState.completedUserMessageIDs.insert(parentID)
                 }
-                entries.append(.turnEnded(date, completed: !hasError && finish != "abort", duration: duration))
+                entries.append(.turnEnded(endDate, completed: !hasError && finish != "abort", duration: duration))
             } else {
                 entries.append(.turnActive(date))
             }
