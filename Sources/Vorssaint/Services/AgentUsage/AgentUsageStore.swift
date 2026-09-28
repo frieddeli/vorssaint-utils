@@ -91,6 +91,9 @@ final class AgentUsageStore {
                 events.append(.finished(provider: provider,
                                         duration: max(0, duration ?? end.timeIntervalSince(turn.started)),
                                         cost: turn.cost, tokens: turn.tokens.total, project: turn.project))
+            case .reset:
+                let baseFile = file.components(separatedBy: "#").first ?? file
+                forget(file: baseFile)
             }
         }
         return events
@@ -126,6 +129,9 @@ final class AgentUsageStore {
                     summary.recordChanged(at: position, previous: old)
                     let extra = reported - (old.cost ?? 0)
                     records[position].cost = reported
+                    if record.reportedCost {
+                        records[position].reportedCost = true
+                    }
                     if let file, var turn = turns[file] ?? waiting[file],
                        record.date >= turn.started.addingTimeInterval(-1) {
                         waiting[file] = nil
@@ -144,10 +150,21 @@ final class AgentUsageStore {
             combined.domestic = combined.domestic || billable.domestic
             let priced = AgentPricing.cost(combined, model: old.model)
             let newCost: Double?
+            let isReported: Bool
             if record.provider == .opencode {
-                newCost = record.cost ?? old.cost ?? priced.cost
+                if record.reportedCost {
+                    newCost = record.cost
+                    isReported = true
+                } else if old.reportedCost {
+                    newCost = old.cost
+                    isReported = true
+                } else {
+                    newCost = priced.cost ?? record.cost ?? old.cost
+                    isReported = false
+                }
             } else {
                 newCost = priced.cost
+                isReported = false
             }
             delta = AgentTokens(input: merged.input - old.tokens.input,
                                 cacheWrite: merged.cacheWrite - old.tokens.cacheWrite,
@@ -159,6 +176,7 @@ final class AgentUsageStore {
             records[position].tokens = merged
             records[position].cost = newCost
             records[position].savings = priced.savings
+            records[position].reportedCost = isReported
         } else {
             summary.recordChanged(at: records.count, previous: nil)
             index[key] = records.count
@@ -178,12 +196,17 @@ final class AgentUsageStore {
         turns[file] = turn
     }
 
-    /// Prices every response again, after a newer list arrives. OpenCode
-    /// rows keep what OpenCode recorded: the list prices a few of its models,
-    /// but the database holds the actual cost for all seventy-five providers.
+    /// Prices every response again, after a newer list arrives. List-derived
+    /// rows recalculate against the new prices, while reported provider charges stay intact.
     func reprice() {
         summary.invalidate()
-        for position in records.indices where records[position].provider != .opencode {
+        for position in records.indices {
+            guard !records[position].reportedCost else { continue }
+            guard !billables[position].isEmpty else {
+                records[position].cost = nil
+                records[position].savings = 0
+                continue
+            }
             let priced = AgentPricing.cost(billables[position], model: records[position].model)
             records[position].cost = priced.cost
             records[position].savings = priced.savings
@@ -265,6 +288,7 @@ final class AgentLogCursor {
     let tracksTurns: Bool
     /// The session log a Claude subagent works for.
     let parent: String?
+    var boundaryRevisions: Set<String> = []
     var offset: UInt64 = 0
     var identity: UInt64 = 0
     var pending = Data()
@@ -350,6 +374,7 @@ enum AgentLogReader {
         if identity != cursor.identity || size < cursor.offset {
             cursor.identity = identity
             cursor.offset = 0
+            cursor.boundaryRevisions.removeAll()
             cursor.pending = Data()
             cursor.discarding = false
             cursor.state = AgentLogState()

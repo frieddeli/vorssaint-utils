@@ -17,9 +17,14 @@ enum AgentOpenCodeReader {
 
         // Check if database was replaced or recreated
         if identity != cursor.identity {
+            let replaced = cursor.identity != 0
             cursor.identity = identity
             cursor.offset = 0
+            cursor.boundaryRevisions.removeAll()
             cursor.state = AgentLogState()
+            if replaced {
+                line(Data(#"{"type":"reset"}"#.utf8))
+            }
         }
 
         var walInfo = stat()
@@ -43,12 +48,25 @@ enum AgentOpenCodeReader {
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 2000)
 
+        var hasParentID = false
+        var pragmaStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(session)", -1, &pragmaStmt, nil) == SQLITE_OK {
+            while sqlite3_step(pragmaStmt) == SQLITE_ROW {
+                if let name = sqlite3_column_text(pragmaStmt, 1), String(cString: name) == "parent_id" {
+                    hasParentID = true
+                    break
+                }
+            }
+            sqlite3_finalize(pragmaStmt)
+        }
+
         let since = Int64(cursor.offset)
+        let parentCol = hasParentID ? "s.parent_id" : "''"
         let query = """
-        SELECT m.id, m.session_id, m.time_created, m.time_updated, s.directory, m.data
+        SELECT m.id, m.session_id, m.time_created, m.time_updated, s.directory, \(parentCol), m.data
         FROM message m
         JOIN session s ON m.session_id = s.id
-        WHERE m.time_created > ? OR (m.time_updated > ? AND m.data NOT LIKE '%"role":"user"%')
+        WHERE m.time_created >= ? OR (m.time_updated >= ? AND m.data NOT LIKE '%"role":"user"%')
         ORDER BY m.time_created ASC, m.time_updated ASC
         """
 
@@ -62,21 +80,38 @@ enum AgentOpenCodeReader {
         sqlite3_bind_int64(stmt, 2, since)
 
         var maxTimestamp: Int64 = since
+        var currentBoundaryRevisions: Set<String> = []
+
         while shouldContinue() && sqlite3_step(stmt) == SQLITE_ROW {
             let id = String(cString: sqlite3_column_text(stmt, 0))
             let sessionID = String(cString: sqlite3_column_text(stmt, 1))
             let created = sqlite3_column_int64(stmt, 2)
             let updated = sqlite3_column_int64(stmt, 3)
             let directory = String(cString: sqlite3_column_text(stmt, 4))
-            let dataStr = String(cString: sqlite3_column_text(stmt, 5))
+            let parentID = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
+            let dataStr = String(cString: sqlite3_column_text(stmt, 6))
 
-            maxTimestamp = max(maxTimestamp, max(created, updated))
+            let isUser = dataStr.contains("\"role\":\"user\"") || dataStr.contains("\"role\": \"user\"")
+            let rowTimestamp = isUser ? created : max(created, updated)
+            let revKey = "\(id):\(isUser ? created : updated)"
+
+            if rowTimestamp < since || (rowTimestamp == since && cursor.boundaryRevisions.contains(revKey)) {
+                continue
+            }
+
+            if rowTimestamp > maxTimestamp {
+                maxTimestamp = rowTimestamp
+                currentBoundaryRevisions = [revKey]
+            } else if rowTimestamp == maxTimestamp {
+                currentBoundaryRevisions.insert(revKey)
+            }
 
             guard var json = (try? JSONSerialization.jsonObject(with: Data(dataStr.utf8))) as? [String: Any] else {
                 continue
             }
             json["id"] = id
             json["session_id"] = sessionID
+            json["parent_session_id"] = parentID
             json["directory"] = directory
             json["time_created"] = created
             json["time_updated"] = updated
@@ -86,6 +121,11 @@ enum AgentOpenCodeReader {
             }
         }
 
-        cursor.offset = UInt64(maxTimestamp)
+        if maxTimestamp > since {
+            cursor.offset = UInt64(maxTimestamp)
+            cursor.boundaryRevisions = currentBoundaryRevisions
+        } else if maxTimestamp == since {
+            cursor.boundaryRevisions.formUnion(currentBoundaryRevisions)
+        }
     }
 }

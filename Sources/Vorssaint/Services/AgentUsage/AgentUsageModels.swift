@@ -71,6 +71,8 @@ struct AgentUsageRecord: Equatable {
     var cost: Double?
     /// What cache reads saved against paying the full input price.
     var savings: Double
+    /// Whether cost was reported directly by the provider rather than derived from list pricing.
+    var reportedCost: Bool = false
 }
 
 /// A usage allowance and how much of it is spent, as the provider reports it.

@@ -298,9 +298,12 @@ final class AgentUsageService: ObservableObject {
             }
             guard !entries.isEmpty else { return }
             changed = true
+            let isSubagent = provider == .opencode && !cursor.state.parentSession.isEmpty
             let turnFile = provider == .opencode && !cursor.state.session.isEmpty ? "\(path)#\(cursor.state.session)" : path
-            let finished = store.apply(entries, file: turnFile, provider: provider, tracksTurns: cursor.tracksTurns,
-                                       parent: cursor.parent, modified: cursor.modified, now: now)
+            let tracksTurns = isSubagent ? false : cursor.tracksTurns
+            let parent = isSubagent ? "\(path)#\(cursor.state.parentSession)" : cursor.parent
+            let finished = store.apply(entries, file: turnFile, provider: provider, tracksTurns: tracksTurns,
+                                       parent: parent, modified: cursor.modified, now: now)
             finished.forEach(report)
         }
         return changed

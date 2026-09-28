@@ -16,6 +16,7 @@ enum AgentLogEntry: Equatable {
     /// Work continues; nil when the line was not worth decoding for its time.
     case turnActive(Date?)
     case turnEnded(Date?, completed: Bool, duration: TimeInterval?)
+    case reset(Date)
 }
 
 /// Per-file context carried from line to line.
@@ -30,6 +31,8 @@ struct AgentLogState: Equatable {
     var lastTotal: AgentTokens?
     /// Codex runs the thread on the fast tier, which bills at a premium.
     var fast = false
+    /// The parent session when a database row belongs to a subagent.
+    var parentSession = ""
     /// OpenCode stores all sessions in one database, tracking per-session state.
     var openCodeSessions: [String: OpenCodeSessionState] = [:]
 }
@@ -41,6 +44,8 @@ struct OpenCodeSessionState: Equatable {
     var turnOpen = false
     var turnStarted: Date?
     var lastUserMessageID = ""
+    var activeUserMessageID = ""
+    var completedAssistantMessageIDs: Set<String> = []
     var completedUserMessageIDs: Set<String> = []
 }
 
@@ -269,12 +274,19 @@ enum AgentLogParser {
     // MARK: OpenCode
 
     static func parseOpenCode(_ line: Data, state: inout AgentLogState, now: Date) -> [AgentLogEntry] {
-        guard contains(line, #""role":""#) else { return [] }
-        guard let json = object(line), let role = json["role"] as? String else { return [] }
+        guard contains(line, #""role":""#) || contains(line, #""type":"reset""#) else { return [] }
+        guard let json = object(line) else { return [] }
+        if json["type"] as? String == "reset" {
+            state.openCodeSessions.removeAll()
+            state.turnOpen = false
+            return [.reset(now)]
+        }
+        guard let role = json["role"] as? String else { return [] }
         let id = json["id"] as? String ?? ""
         let session = json["session_id"] as? String ?? ""
         let sessionID = session.isEmpty ? state.session : native(session)
         state.session = sessionID
+        state.parentSession = json["parent_session_id"] as? String ?? ""
 
         var sessionState = state.openCodeSessions[sessionID] ?? OpenCodeSessionState()
 
@@ -293,6 +305,7 @@ enum AgentLogParser {
                     return []
                 }
                 sessionState.lastUserMessageID = id
+                sessionState.activeUserMessageID = id
             }
             var entries: [AgentLogEntry] = []
             if sessionState.turnOpen {
@@ -333,26 +346,37 @@ enum AgentLogParser {
             let cacheRead = int(cacheDict["read"])
             let cacheWrite = int(cacheDict["write"])
             let tokens = AgentTokens(input: input, cacheWrite: cacheWrite, cacheRead: cacheRead,
-                                     output: output, reasoning: reasoning)
+                                     output: output + reasoning, reasoning: reasoning)
             let billable = AgentBillable(tokens: tokens)
             let priced = AgentPricing.cost(billable, model: sessionState.model)
-            let reportedCost = (json["cost"] as? NSNumber)?.doubleValue
+            let reportedCostVal = (json["cost"] as? NSNumber)?.doubleValue
             let cost: Double?
+            let isReported: Bool
             if let calculated = priced.cost {
                 cost = calculated
-            } else if let reportedCost, reportedCost > 0 {
-                cost = reportedCost
+                isReported = false
+            } else if let reportedCostVal, reportedCostVal > 0 {
+                cost = reportedCostVal
+                isReported = true
             } else {
                 cost = nil
+                isReported = false
             }
 
             let key = "opencode:\(sessionID):\(id.isEmpty ? "\(date.timeIntervalSince1970)" : id)"
             let record = AgentUsageRecord(
                 provider: .opencode, date: date, model: sessionState.model, project: sessionState.project,
-                session: sessionID, tokens: tokens, cost: cost, savings: priced.savings
+                session: sessionID, tokens: tokens, cost: cost, savings: priced.savings,
+                reportedCost: isReported
             )
+
+            let parentID = json["parentID"] as? String ?? ""
+            let isAlreadyCompleted = (!id.isEmpty && sessionState.completedAssistantMessageIDs.contains(id))
+                || (!parentID.isEmpty && sessionState.completedUserMessageIDs.contains(parentID))
+            let matchesActivePrompt = parentID.isEmpty || parentID == sessionState.activeUserMessageID
+
             var entries: [AgentLogEntry] = []
-            if !sessionState.turnOpen {
+            if !isAlreadyCompleted && matchesActivePrompt && !sessionState.turnOpen {
                 sessionState.turnOpen = true
                 sessionState.turnStarted = date
                 entries.append(.turnBegan(date))
@@ -361,30 +385,37 @@ enum AgentLogParser {
 
             let finish = json["finish"] as? String
             let hasError = json["error"] != nil
-            let parentID = json["parentID"] as? String ?? ""
-
-            let timeCompleted = (json["time"] as? [String: Any])?["completed"] ?? json["time_updated"]
-            let endDate = seconds(timeCompleted) ?? date
-            var duration: TimeInterval?
-            if let turnStarted = sessionState.turnStarted {
-                if endDate >= turnStarted {
-                    duration = endDate.timeIntervalSince(turnStarted)
-                }
-            } else if endDate >= date {
-                duration = endDate.timeIntervalSince(date)
-            }
 
             if finish == "stop" || finish == "abort" || finish == "end_turn" || hasError {
-                sessionState.turnOpen = false
-                sessionState.turnStarted = nil
+                if !isAlreadyCompleted && matchesActivePrompt && sessionState.turnOpen {
+                    let timeCompleted = (json["time"] as? [String: Any])?["completed"] ?? json["time_updated"]
+                    let endDate = seconds(timeCompleted) ?? date
+                    var duration: TimeInterval?
+                    if let turnStarted = sessionState.turnStarted {
+                        if endDate >= turnStarted {
+                            duration = endDate.timeIntervalSince(turnStarted)
+                        }
+                    } else if endDate >= date {
+                        duration = endDate.timeIntervalSince(date)
+                    }
+                    sessionState.turnOpen = false
+                    sessionState.turnStarted = nil
+                    sessionState.activeUserMessageID = ""
+                    entries.append(.turnEnded(endDate, completed: !hasError && finish != "abort", duration: duration))
+                }
+                if !id.isEmpty {
+                    if sessionState.completedAssistantMessageIDs.count > 100 {
+                        sessionState.completedAssistantMessageIDs.removeFirst()
+                    }
+                    sessionState.completedAssistantMessageIDs.insert(id)
+                }
                 if !parentID.isEmpty {
-                    if sessionState.completedUserMessageIDs.count > 50 {
+                    if sessionState.completedUserMessageIDs.count > 100 {
                         sessionState.completedUserMessageIDs.removeFirst()
                     }
                     sessionState.completedUserMessageIDs.insert(parentID)
                 }
-                entries.append(.turnEnded(endDate, completed: !hasError && finish != "abort", duration: duration))
-            } else {
+            } else if !isAlreadyCompleted && matchesActivePrompt {
                 entries.append(.turnActive(date))
             }
             state.openCodeSessions[sessionID] = sessionState

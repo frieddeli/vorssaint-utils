@@ -470,7 +470,7 @@ enum NotchAgentTests {
                         && record.project == "backend" && record.session == "s_oc_1"
                         && record.cost == 0.0042,
                      "OpenCode uses exact reported cost and keeps project, session and model")
-        suite.expect(record.tokens == AgentTokens(input: 1000, cacheWrite: 0, cacheRead: 50, output: 200, reasoning: 50),
+        suite.expect(record.tokens == AgentTokens(input: 1000, cacheWrite: 0, cacheRead: 50, output: 250, reasoning: 50),
                      "exact token breakdowns are parsed from OpenCode tokens dictionary")
         let activeDate = Date(timeIntervalSince1970: 1_790_088_005)
         suite.expect(activeEntries.contains(.turnActive(activeDate)),
@@ -498,7 +498,7 @@ enum NotchAgentTests {
         suite.expect(abs(totalCost - 0.0057) < 0.000001,
                      "OpenCode total cost aggregates reported costs")
         suite.expect(storeEvents == [.finished(provider: .opencode, duration: 20, cost: 0.0057,
-                                              tokens: 1750, project: "backend")],
+                                              tokens: 1800, project: "backend")],
                      "OpenCode turn finish generates .finished usage event with accumulated turn cost and tokens")
 
         // 5. Model pricing fallback: unpriced vs list price fallback
@@ -745,6 +745,382 @@ enum NotchAgentTests {
                                           now: Date(timeIntervalSince1970: 1_790_089_425))
         suite.expect(appliedEvents == [.finished(provider: .opencode, duration: 25, cost: 0.01, tokens: 500, project: "p")],
                      "store emits .finished event when OpenCode assistant turn stops")
+
+        // PR #2215 maintainer review comment test suites
+        openCodeReasoningTokens(suite, now: now)
+        openCodeMillisecondDedup(suite)
+        openCodeLifecycleIdempotence(suite, now: now)
+        openCodeRepricing(suite, now: now)
+        openCodeSubagents(suite, now: now)
+        openCodeDatabaseReplacement(suite, now: now)
+    }
+
+    private static func openCodeReasoningTokens(_ suite: TestSuite, now: Date) {
+        var reasoningState = AgentLogState()
+        // gpt-6-astra is in agent-prices.json: input: $10/M, output: $50/M
+        let reasoningMsg = line("""
+        {"id":"msg_rsn","session_id":"s_rsn","time_created":1790089500,"directory":"/Users/me/code/backend","role":"assistant","model_id":"gpt-6-astra","cost":0,"tokens":{"total":1500,"input":1000,"output":300,"reasoning":200,"cache":{"read":0,"write":0}},"finish":"stop"}
+        """)
+        let entries = AgentLogParser.parseOpenCode(reasoningMsg, state: &reasoningState, now: now)
+        guard case .usage(_, let rec, _)? = entries.first(where: {
+            if case .usage = $0 { return true }; return false
+        }) else {
+            suite.expect(false, "a response with reasoning tokens yields usage")
+            return
+        }
+        suite.expect(rec.tokens.output == 500, "tokens.output includes output + reasoning (300 + 200 = 500)")
+        suite.expect(rec.tokens.reasoning == 200, "tokens.reasoning retains reasoning tokens (200)")
+        suite.expect(rec.tokens.total == 1500, "tokens.total includes input, cache, and output + reasoning (1000 + 500 = 1500)")
+        // Expected list price: (1000 * 10 + 500 * 50) / 1_000_000 = (10_000 + 25_000) / 1_000_000 = 0.035
+        suite.expectClose(rec.cost ?? -1, 0.035,
+                          "when list-priced, output price is calculated using output + reasoning",
+                          tol: 0.000001)
+    }
+
+    private static func openCodeMillisecondDedup(_ suite: TestSuite) {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "vorss-boundary-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbPath = dir.appending(path: "opencode.db").path
+
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK, let db else {
+            suite.expect(false, "boundary database opens")
+            return
+        }
+        sqlite3_exec(db, """
+        CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        INSERT INTO session VALUES ('s_bd', '/p', 1790088000000, 1790088000000);
+        INSERT INTO message VALUES ('m1', 's_bd', 1790088000000, 1790088000000, '{"role":"user","parts":[{"type":"text","text":"start"}]}');
+        """, nil, nil, nil)
+        sqlite3_close(db)
+
+        let cursor = AgentLogCursor(path: dbPath, provider: .opencode)
+        var linesRead: [String] = []
+        AgentOpenCodeReader.readAppended(cursor) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
+        suite.expect(linesRead.count == 1 && cursor.offset == 1_790_088_000_000,
+                     "boundary initial read returns m1 and sets offset")
+
+        // Insert two messages m2 and m3 committed in the SAME millisecond timestamp
+        var db2: OpaquePointer?
+        guard sqlite3_open(dbPath, &db2) == SQLITE_OK, let db2 else {
+            suite.expect(false, "re-opening boundary database")
+            return
+        }
+        let sameMs: Int64 = 1_790_088_005_000
+        sqlite3_exec(db2, """
+        INSERT INTO message VALUES ('m2', 's_bd', \(sameMs), \(sameMs), '{"role":"assistant","tokens":{"input":10,"output":5}}');
+        INSERT INTO message VALUES ('m3', 's_bd', \(sameMs), \(sameMs), '{"role":"assistant","tokens":{"input":20,"output":10},"finish":"stop"}');
+        """, nil, nil, nil)
+        sqlite3_close(db2)
+
+        linesRead.removeAll()
+        AgentOpenCodeReader.readAppended(cursor) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
+        suite.expect(linesRead.count == 2
+                        && linesRead.contains { $0.contains(#""id":"m2"#) }
+                        && linesRead.contains { $0.contains(#""id":"m3"#) }
+                        && cursor.offset == UInt64(sameMs),
+                     "same-millisecond messages m2 and m3 are both read without skipping")
+
+        // Third read with no new messages does not duplicate m2 or m3
+        linesRead.removeAll()
+        AgentOpenCodeReader.readAppended(cursor) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
+        suite.expect(linesRead.isEmpty, "third read with no new messages does not duplicate m2 or m3")
+    }
+
+    private static func openCodeLifecycleIdempotence(_ suite: TestSuite, now: Date) {
+        // Ordering 1: Turn 1 starts with usr_1, ast_1 finishes turn 1. Turn 2 starts with usr_2.
+        // An update to ast_1 arrives: Turn 2 remains open and active (turnOpen == true),
+        // and ast_1 does not close Turn 2. Then ast_2 arrives and properly closes Turn 2.
+        var o1State = AgentLogState()
+        let o1User1 = line(#"{"id":"usr_1","session_id":"s_o1","time_created":1790089600,"directory":"/p","role":"user","parts":[{"type":"text","text":"do 1"}]}"#)
+        let o1Ast1 = line(#"{"id":"ast_1","parentID":"usr_1","session_id":"s_o1","time_created":1790089605,"directory":"/p","role":"assistant","finish":"stop","tokens":{"input":100,"output":50}}"#)
+        let o1User2 = line(#"{"id":"usr_2","session_id":"s_o1","time_created":1790089610,"directory":"/p","role":"user","parts":[{"type":"text","text":"do 2"}]}"#)
+
+        _ = AgentLogParser.parseOpenCode(o1User1, state: &o1State, now: now)
+        let o1Ast1Entries = AgentLogParser.parseOpenCode(o1Ast1, state: &o1State, now: now)
+        suite.expect(o1Ast1Entries.contains { if case .turnEnded = $0 { return true }; return false },
+                     "ast_1 finishes Turn 1")
+        suite.expect(o1State.openCodeSessions["s_o1"]?.turnOpen == false, "Turn 1 is closed")
+
+        let o1User2Entries = AgentLogParser.parseOpenCode(o1User2, state: &o1State, now: now)
+        suite.expect(o1User2Entries.contains { if case .turnBegan = $0 { return true }; return false },
+                     "usr_2 begins Turn 2")
+        suite.expect(o1State.openCodeSessions["s_o1"]?.turnOpen == true, "Turn 2 is open")
+
+        // Update to ast_1 arrives (e.g. updated token counts or time_updated)
+        let o1Ast1Update = line(#"{"id":"ast_1","parentID":"usr_1","session_id":"s_o1","time_created":1790089605,"time_updated":1790089612,"directory":"/p","role":"assistant","finish":"stop","tokens":{"input":120,"output":60}}"#)
+        let o1Ast1UpdateEntries = AgentLogParser.parseOpenCode(o1Ast1Update, state: &o1State, now: now)
+        suite.expect(!o1Ast1UpdateEntries.contains { if case .turnEnded = $0 { return true }; return false }
+                        && !o1Ast1UpdateEntries.contains { if case .turnBegan = $0 { return true }; return false },
+                     "update to completed ast_1 does not emit turnEnded or turnBegan")
+        suite.expect(o1State.openCodeSessions["s_o1"]?.turnOpen == true,
+                     "Turn 2 remains open and active after update to completed ast_1")
+
+        // ast_2 arrives and properly closes Turn 2
+        let o1Ast2 = line(#"{"id":"ast_2","parentID":"usr_2","session_id":"s_o1","time_created":1790089615,"directory":"/p","role":"assistant","finish":"stop","tokens":{"input":80,"output":40}}"#)
+        let o1Ast2Entries = AgentLogParser.parseOpenCode(o1Ast2, state: &o1State, now: now)
+        suite.expect(o1Ast2Entries.contains { if case .turnEnded = $0 { return true }; return false },
+                     "ast_2 properly closes Turn 2")
+        suite.expect(o1State.openCodeSessions["s_o1"]?.turnOpen == false, "Turn 2 is now closed")
+
+        // Ordering 2: Turn 1 starts with usr_1. Before ast_1 arrives, user sends usr_2.
+        // When ast_1 (with parentID: usr_1, finish: stop) arrives, it does NOT close Turn 2
+        // (matchesActivePrompt is false). Turn 2 stays open until ast_2 arrives.
+        var o2State = AgentLogState()
+        let o2User1 = line(#"{"id":"usr_1","session_id":"s_o2","time_created":1790089700,"directory":"/p","role":"user","parts":[{"type":"text","text":"first"}]}"#)
+        let o2User2 = line(#"{"id":"usr_2","session_id":"s_o2","time_created":1790089705,"directory":"/p","role":"user","parts":[{"type":"text","text":"second"}]}"#)
+        let o2Ast1 = line(#"{"id":"ast_1","parentID":"usr_1","session_id":"s_o2","time_created":1790089710,"directory":"/p","role":"assistant","finish":"stop","tokens":{"input":50,"output":25}}"#)
+        let o2Ast2 = line(#"{"id":"ast_2","parentID":"usr_2","session_id":"s_o2","time_created":1790089715,"directory":"/p","role":"assistant","finish":"stop","tokens":{"input":60,"output":30}}"#)
+
+        _ = AgentLogParser.parseOpenCode(o2User1, state: &o2State, now: now)
+        suite.expect(o2State.openCodeSessions["s_o2"]?.activeUserMessageID == "usr_1", "activeUserMessageID is usr_1")
+        _ = AgentLogParser.parseOpenCode(o2User2, state: &o2State, now: now)
+        suite.expect(o2State.openCodeSessions["s_o2"]?.activeUserMessageID == "usr_2", "activeUserMessageID is now usr_2")
+        suite.expect(o2State.openCodeSessions["s_o2"]?.turnOpen == true, "Turn 2 is open")
+
+        let o2Ast1Entries = AgentLogParser.parseOpenCode(o2Ast1, state: &o2State, now: now)
+        suite.expect(!o2Ast1Entries.contains { if case .turnEnded = $0 { return true }; return false },
+                     "ast_1 with parentID usr_1 does not close Turn 2 (matchesActivePrompt is false)")
+        suite.expect(o2State.openCodeSessions["s_o2"]?.turnOpen == true,
+                     "Turn 2 stays open when ast_1 from earlier prompt arrives")
+
+        let o2Ast2Entries = AgentLogParser.parseOpenCode(o2Ast2, state: &o2State, now: now)
+        suite.expect(o2Ast2Entries.contains { if case .turnEnded = $0 { return true }; return false },
+                     "ast_2 with parentID usr_2 closes Turn 2")
+        suite.expect(o2State.openCodeSessions["s_o2"]?.turnOpen == false, "Turn 2 is closed")
+
+        // Duplicate/repeated assistant updates for already completed turn do not emit .turnBegan or .turnEnded
+        let o2Ast2Dup = line(#"{"id":"ast_2","parentID":"usr_2","session_id":"s_o2","time_created":1790089715,"time_updated":1790089720,"directory":"/p","role":"assistant","finish":"stop","tokens":{"input":70,"output":35}}"#)
+        let o2DupEntries = AgentLogParser.parseOpenCode(o2Ast2Dup, state: &o2State, now: now)
+        suite.expect(!o2DupEntries.contains { if case .turnBegan = $0 { return true }; return false }
+                        && !o2DupEntries.contains { if case .turnEnded = $0 { return true }; return false },
+                     "duplicate assistant update for completed turn does not emit turnBegan or turnEnded")
+    }
+
+    private static func openCodeRepricing(_ suite: TestSuite, now: Date) {
+        let store = AgentUsageStore()
+        var state = AgentLogState()
+
+        // 1. Record with reported cost (unknown model with explicit reported cost)
+        let reportedMsg = line("""
+        {"id":"m_rep","session_id":"s_rp","time_created":1790089800,"directory":"/p","role":"assistant","model_id":"stealth/ox-alpha","cost":0.005,"tokens":{"input":1000,"output":200}}
+        """)
+        let repEntries = AgentLogParser.parseOpenCode(reportedMsg, state: &state, now: now)
+        _ = store.apply(repEntries, file: "db#s_rp", provider: .opencode, tracksTurns: false, modified: now, now: now)
+
+        // 2. Record with list-derived cost (known model, e.g. claude-3-5-sonnet)
+        let listMsg = line("""
+        {"id":"m_list","session_id":"s_rp","time_created":1790089810,"directory":"/p","role":"assistant","model_id":"claude-3-5-sonnet","cost":0,"tokens":{"input":1000,"output":200}}
+        """)
+        let listEntries = AgentLogParser.parseOpenCode(listMsg, state: &state, now: now)
+        _ = store.apply(listEntries, file: "db#s_rp", provider: .opencode, tracksTurns: false, modified: now, now: now)
+
+        // 3. Unpriced record for an unlisted model
+        let unpricedMsg = line("""
+        {"id":"m_unp","session_id":"s_rp","time_created":1790089820,"directory":"/p","role":"assistant","model_id":"custom-nova-1","cost":0,"tokens":{"input":1000,"output":200}}
+        """)
+        let unpEntries = AgentLogParser.parseOpenCode(unpricedMsg, state: &state, now: now)
+        _ = store.apply(unpEntries, file: "db#s_rp", provider: .opencode, tracksTurns: false, modified: now, now: now)
+
+        suite.expect(store.records.count == 3, "three OpenCode records stored")
+        let repRec = store.records.first { $0.session == "s_rp" && $0.model == "stealth/ox-alpha" }
+        let listRec = store.records.first { $0.session == "s_rp" && $0.model == "claude-3-5-sonnet" }
+        let unpRec = store.records.first { $0.session == "s_rp" && $0.model == "custom-nova-1" }
+
+        suite.expect(repRec?.reportedCost == true && repRec?.cost == 0.005,
+                     "reported record has reportedCost: true and preserved exact cost")
+        suite.expect(listRec?.reportedCost == false && abs((listRec?.cost ?? 0) - 0.006) < 0.000001,
+                     "list-derived record calculates cost from price list (input 3, output 15 -> 0.006)")
+        suite.expect(unpRec?.reportedCost == false && unpRec?.cost == nil,
+                     "unlisted model with cost 0 starts unpriced")
+
+        // Now install an updated price list with doubled prices for claude-3-5-sonnet and a new price for custom-nova-1
+        let prevList = AgentPricing.list
+        var newClaudeModels = prevList.claude.filter { $0.id != "claude-3-5-sonnet" }
+        newClaudeModels.append(AgentPriceList.Model(id: "claude-3-5-sonnet",
+                                                    price: AgentPrice(input: 6, output: 30, cacheRead: 0.6, cacheWrite: 7.5, cacheWriteLong: 12)))
+        var newCodexModels = prevList.codex
+        newCodexModels.append(AgentPriceList.Model(id: "custom-nova-1",
+                                                   price: AgentPrice(input: 4, output: 20, cacheRead: 0.4, cacheWrite: 4, cacheWriteLong: 4)))
+
+        let updatedList = AgentPriceList(updated: Date(), claude: newClaudeModels, codex: newCodexModels,
+                                         claudePlans: prevList.claudePlans, codexPlans: prevList.codexPlans,
+                                         webSearch: prevList.webSearch, usOnlyMultiplier: prevList.usOnlyMultiplier)
+        AgentPricing.install(updatedList)
+        defer { AgentPricing.install(prevList) }
+
+        store.reprice()
+
+        let repAfter = store.records.first { $0.session == "s_rp" && $0.model == "stealth/ox-alpha" }
+        let listAfter = store.records.first { $0.session == "s_rp" && $0.model == "claude-3-5-sonnet" }
+        let unpAfter = store.records.first { $0.session == "s_rp" && $0.model == "custom-nova-1" }
+
+        suite.expect(repAfter?.cost == 0.005,
+                     "store.reprice() preserves reported cost unchanged")
+        suite.expectClose(listAfter?.cost ?? -1, 0.012,
+                          "store.reprice() updates list-derived cost using new price (input 6, output 30 -> 0.012)",
+                          tol: 0.000001)
+        suite.expectClose(unpAfter?.cost ?? -1, 0.008,
+                          "store.reprice() calculates cost for previously unpriced model that gained a price",
+                          tol: 0.000001)
+    }
+
+    private static func openCodeSubagents(_ suite: TestSuite, now: Date) {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "vorss-subagent-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbPath = dir.appending(path: "opencode.db").path
+
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK, let db else {
+            suite.expect(false, "subagent database opens")
+            return
+        }
+        sqlite3_exec(db, """
+        CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_created INTEGER, time_updated INTEGER, parent_id TEXT);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        INSERT INTO session VALUES ('s_parent', '/Users/me/code/proj', 1790088000000, 1790088050000, NULL);
+        INSERT INTO session VALUES ('s_child', '/Users/me/code/sub_proj', 1790088005000, 1790088030000, 's_parent');
+        """, nil, nil, nil)
+
+        // Parent starts turn
+        sqlite3_exec(db, """
+        INSERT INTO message VALUES ('m_p1', 's_parent', 1790088000000, 1790088000000, '{"role":"user","parts":[{"type":"text","text":"parent prompt"}]}');
+        """, nil, nil, nil)
+        sqlite3_close(db)
+
+        let cursor = AgentLogCursor(path: dbPath, provider: .opencode)
+        let store = AgentUsageStore()
+        store.reportsTransitions = true
+        var collectedEvents: [AgentUsageEvent] = []
+
+        func readAndApply() {
+            AgentOpenCodeReader.readAppended(cursor) { lineData in
+                let entries = AgentLogParser.parseOpenCode(lineData, state: &cursor.state, now: now)
+                guard !entries.isEmpty else { return }
+                let isSubagent = !cursor.state.parentSession.isEmpty
+                let turnFile = !cursor.state.session.isEmpty ? "\(dbPath)#\(cursor.state.session)" : dbPath
+                let tracksTurns = isSubagent ? false : cursor.tracksTurns
+                let parent = isSubagent ? "\(dbPath)#\(cursor.state.parentSession)" : cursor.parent
+                let finished = store.apply(entries, file: turnFile, provider: .opencode,
+                                           tracksTurns: tracksTurns, parent: parent, modified: now, now: now)
+                collectedEvents += finished
+            }
+        }
+
+        readAndApply()
+        suite.expect(store.turns["\(dbPath)#s_parent"] != nil, "parent turn is open")
+
+        // Child session emits usage and finish (finish: stop)
+        var db2: OpaquePointer?
+        guard sqlite3_open(dbPath, &db2) == SQLITE_OK, let db2 else {
+            suite.expect(false, "re-opening subagent database for child")
+            return
+        }
+        sqlite3_exec(db2, """
+        INSERT INTO message VALUES ('m_c1', 's_child', 1790088010000, 1790088010000, '{"role":"assistant","model_id":"stealth/ox-alpha","cost":0.002,"tokens":{"total":100,"input":80,"output":20},"finish":"stop"}');
+        """, nil, nil, nil)
+        sqlite3_close(db2)
+
+        readAndApply()
+
+        // Verify child usage rolls into parent turn and child finish does not emit .finished event
+        let parentTurnAfterChild = store.turns["\(dbPath)#s_parent"]
+        suite.expect(parentTurnAfterChild?.tokens.total == 100 && abs((parentTurnAfterChild?.cost ?? 0) - 0.002) < 0.000001,
+                     "child usage rolls into parent turn tokens and cost")
+        suite.expect(collectedEvents.isEmpty,
+                     "child finish does NOT emit .finished event for child")
+
+        // Parent finishes turn
+        var db3: OpaquePointer?
+        guard sqlite3_open(dbPath, &db3) == SQLITE_OK, let db3 else {
+            suite.expect(false, "re-opening subagent database for parent finish")
+            return
+        }
+        sqlite3_exec(db3, """
+        INSERT INTO message VALUES ('m_p2', 's_parent', 1790088020000, 1790088020000, '{"id":"m_p2","parentID":"m_p1","role":"assistant","model_id":"stealth/ox-alpha","cost":0.003,"tokens":{"total":200,"input":150,"output":50},"finish":"stop"}');
+        """, nil, nil, nil)
+        sqlite3_close(db3)
+
+        readAndApply()
+
+        // Verify parent finish emits single .finished event with combined tokens and parent project/model
+        suite.expect(collectedEvents == [.finished(provider: .opencode, duration: 20, cost: 0.005,
+                                                   tokens: 300, project: "proj")],
+                     "parent finish emits single .finished event with combined tokens, cost, and parent project")
+        suite.expect(store.turns["\(dbPath)#s_parent"] == nil, "parent turn is closed after parent finish")
+    }
+
+    private static func openCodeDatabaseReplacement(_ suite: TestSuite, now: Date) {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "vorss-replace-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let activePath = dir.appending(path: "opencode.db").path
+        let altPath = dir.appending(path: "opencode_alt.db").path
+
+        // 1. Create db1 at activePath with session s1 having an open live turn
+        var db1: OpaquePointer?
+        guard sqlite3_open(activePath, &db1) == SQLITE_OK, let db1 else {
+            suite.expect(false, "db1 opens")
+            return
+        }
+        sqlite3_exec(db1, """
+        CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        INSERT INTO session VALUES ('s1', '/proj1', 1790088000000, 1790088000000);
+        INSERT INTO message VALUES ('m1', 's1', 1790088000000, 1790088000000, '{"role":"user","parts":[{"type":"text","text":"start 1"}]}');
+        """, nil, nil, nil)
+        sqlite3_close(db1)
+
+        let cursor = AgentLogCursor(path: activePath, provider: .opencode)
+        let store = AgentUsageStore()
+        store.reportsTransitions = true
+
+        func readActive() {
+            AgentOpenCodeReader.readAppended(cursor) { lineData in
+                let entries = AgentLogParser.parseOpenCode(lineData, state: &cursor.state, now: now)
+                let turnFile = !cursor.state.session.isEmpty ? "\(activePath)#\(cursor.state.session)" : activePath
+                _ = store.apply(entries, file: turnFile, provider: .opencode, tracksTurns: true, modified: now, now: now)
+            }
+        }
+
+        readActive()
+        suite.expect(store.turns["\(activePath)#s1"] != nil, "db1 has session s1 with an open live turn")
+
+        // 2. Create db2 at altPath with session s2 having an open live turn
+        var db2: OpaquePointer?
+        guard sqlite3_open(altPath, &db2) == SQLITE_OK, let db2 else {
+            suite.expect(false, "db2 opens")
+            return
+        }
+        sqlite3_exec(db2, """
+        CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        INSERT INTO session VALUES ('s2', '/proj2', 1790088010000, 1790088010000);
+        INSERT INTO message VALUES ('m2', 's2', 1790088010000, 1790088010000, '{"role":"user","parts":[{"type":"text","text":"start 2"}]}');
+        """, nil, nil, nil)
+        sqlite3_close(db2)
+
+        // Replace db1 with db2 (removes old file and moves new file with different inode)
+        try? FileManager.default.removeItem(atPath: activePath)
+        try? FileManager.default.moveItem(atPath: altPath, toPath: activePath)
+
+        // Read cursor again
+        readActive()
+
+        // Verify db1's live turn s1 was retired/forgotten, and only db2's session s2 is present
+        suite.expect(store.turns["\(activePath)#s1"] == nil,
+                     "database replacement retires and forgets old db1 live turn s1")
+        suite.expect(store.turns["\(activePath)#s2"] != nil,
+                     "only db2 session s2 is present in live turns after database replacement")
     }
 
     private static func timestamps(_ suite: TestSuite) {
@@ -1328,6 +1704,18 @@ enum NotchAgentTests {
                      "elapsed time reads like a stopwatch")
         suite.expect(AgentFormat.day(Date(timeIntervalSince1970: 1_790_035_200), locale: english) == "Sep 22, 2026",
                      "the price list's day reads the same in every time zone")
+
+        func openCodeCardCost(unpriced: Int, cost: Double) -> String {
+            if unpriced > 0 {
+                return cost > 0 ? "≥ " + AgentFormat.cost(cost, locale: english) : "—"
+            }
+            return AgentFormat.cost(cost, locale: english)
+        }
+        suite.expect(openCodeCardCost(unpriced: 0, cost: 12.5) == "$12.50"
+                        && openCodeCardCost(unpriced: 1, cost: 12.5) == "≥ $12.50"
+                        && openCodeCardCost(unpriced: 2, cost: 0) == "—"
+                        && openCodeCardCost(unpriced: 0, cost: 0) == "$0.00",
+                     "OpenCode limits card formats unpriced costs as lower bound or em dash")
     }
 }
 
