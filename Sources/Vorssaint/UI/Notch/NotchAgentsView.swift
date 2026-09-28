@@ -273,32 +273,35 @@ private struct NotchAgentLimitsCard: View {
             setUpLimits
         } else if provider == .antigravity {
             let todayUsage = snapshot.usage(.today).byProvider[.antigravity]
-            if let todayUsage, todayUsage.tokens.total > 0 {
+            if let todayUsage, todayUsage.requests > 0 || todayUsage.tokens.total > 0 {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 5) {
                         Text(text.period(.today))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.white.opacity(0.85))
                         Spacer(minLength: 2)
-                        Text(AgentFormat.cost(todayUsage.cost))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
+                        if todayUsage.cost > 0 {
+                            Text(AgentFormat.cost(todayUsage.cost))
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                        } else {
+                            Text("\(todayUsage.requests) \(todayUsage.requests == 1 ? "turn" : "turns")")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     HStack(spacing: 4) {
-                        Text(AgentFormat.tokens(todayUsage.tokens.total))
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                        if let rate = todayUsage.tokens.cacheHitRate, rate > 0 {
-                            Text("· \(AgentFormat.percent(rate)) \(text.cached(""))".trimmingCharacters(in: .whitespaces))
+                        if todayUsage.tokens.total > 0 {
+                            Text(AgentFormat.tokens(todayUsage.tokens.total))
                                 .font(.system(size: 9.5))
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.secondary)
                         }
                         Spacer()
                         lastUsed
                     }
                 }
             } else {
-                Text(text.waitingForLimits).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
+                Text(text.noSession).font(.system(size: 10.5)).foregroundStyle(.secondary)
                 lastUsed
             }
         } else {

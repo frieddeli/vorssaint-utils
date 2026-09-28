@@ -300,12 +300,14 @@ enum AgentLogParser {
                 }
             }
 
+            let billable = AgentBillable()
+            let priced = AgentPricing.cost(billable, model: state.model)
             let key = "antigravity:\(state.session):\(step)"
             let record = AgentUsageRecord(
                 provider: .antigravity, date: date, model: state.model, project: state.project,
-                session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
+                session: state.session, tokens: AgentTokens(), cost: priced.cost, savings: priced.savings
             )
-            let usageEntry = AgentLogEntry.usage(key: key, record: record, billable: AgentBillable())
+            let usageEntry = AgentLogEntry.usage(key: key, record: record, billable: billable)
             var entries: [AgentLogEntry] = []
             if !state.turnOpen {
                 state.turnOpen = true

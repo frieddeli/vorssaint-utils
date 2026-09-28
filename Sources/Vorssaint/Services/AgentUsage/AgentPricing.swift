@@ -37,6 +37,9 @@ struct AgentBillable: Equatable {
     /// Inference pinned to the United States.
     var domestic = false
     var webSearches = 0
+
+    /// Responses with no measured tokens or searches have no billable usage.
+    var isEmpty: Bool { tokens.total == 0 && webSearches == 0 }
 }
 
 /// Every price the island knows, kept out of the code: a copy ships with the
@@ -235,6 +238,7 @@ enum AgentPricing {
     }
 
     static func cost(_ billable: AgentBillable, model: String) -> (cost: Double?, savings: Double) {
+        guard !billable.isEmpty else { return (nil, 0) }
         let list = self.list
         guard let price = price(for: model, in: list) else { return (nil, 0) }
         let tokens = billable.tokens

@@ -547,6 +547,55 @@ enum NotchAgentTests {
             .reduce(0.0, { $0 + ($1.cost ?? 0) })
         suite.expect(eligibleSpent < budget,
                      "startup budget baseline ignores Antigravity and does not suppress later Claude/Codex crossings")
+
+        // Unavailable usage state is preserved through repricing before and after price updates for known models
+        let repriceStore = AgentUsageStore()
+        var knownModelState = AgentLogState()
+        let knownModelPrompt = line(#"{"step_index":1,"type":"USER_INPUT","status":"DONE","created_at":"2026-09-28T00:00:00.000Z","content":"Explain quantum computing"}"#)
+        let knownModelReply = line(#"{"step_index":2,"type":"PLANNER_RESPONSE","model":"gemini-2.5-pro","status":"DONE","created_at":"2026-09-28T00:00:05.000Z","content":"Quantum computing uses qubits."}"#)
+        _ = repriceStore.apply(AgentLogParser.parseAntigravity(knownModelPrompt, state: &knownModelState, now: now),
+                               file: "brain/conv-known/transcript.jsonl", provider: .antigravity,
+                               tracksTurns: true, modified: now)
+        _ = repriceStore.apply(AgentLogParser.parseAntigravity(knownModelReply, state: &knownModelState, now: now),
+                               file: "brain/conv-known/transcript.jsonl", provider: .antigravity,
+                               tracksTurns: true, modified: now)
+
+        let testNow = Date(timeIntervalSince1970: 1_790_553_610)
+        let initialRecord = repriceStore.records.first
+        let initialSnapshot = repriceStore.snapshot(plans: [:], providers: [.antigravity], now: testNow, calendar: Calendar.autoupdatingCurrent)
+        suite.expect(initialRecord?.model == "gemini-2.5-pro"
+                        && initialRecord?.cost == nil
+                        && initialRecord?.savings == 0
+                        && initialSnapshot.usage(.today).total.unpriced == 1
+                        && initialSnapshot.usage(.today).fullyPriced == false,
+                     "known model initially preserves unavailable cost as nil and marks period unpriced")
+
+        let shippedPrices = AgentPricing.list
+        let updatedPrices = AgentPriceList(updated: shippedPrices.updated.addingTimeInterval(86_400),
+                                           claude: shippedPrices.claude,
+                                           codex: shippedPrices.codex.map { m in
+                                               guard m.id == "gemini-2.5-pro" else { return m }
+                                               let p = m.price
+                                               return AgentPriceList.Model(id: m.id, price: AgentPrice(
+                                                   input: p.input * 2, output: p.output * 2, cacheRead: p.cacheRead * 2,
+                                                   cacheWrite: p.cacheWrite * 2, cacheWriteLong: p.cacheWriteLong * 2,
+                                                   longContext: p.longContext))
+                                           },
+                                           claudePlans: shippedPrices.claudePlans, codexPlans: shippedPrices.codexPlans,
+                                           webSearch: shippedPrices.webSearch, usOnlyMultiplier: shippedPrices.usOnlyMultiplier)
+        AgentPricing.install(updatedPrices)
+        repriceStore.reprice()
+
+        let repricedRecord = repriceStore.records.first
+        let repricedSnapshot = repriceStore.snapshot(plans: [:], providers: [.antigravity], now: testNow, calendar: Calendar.autoupdatingCurrent)
+        suite.expect(repricedRecord?.cost == nil
+                        && repricedRecord?.savings == 0
+                        && repricedSnapshot.usage(.today).total.unpriced == 1
+                        && repricedSnapshot.usage(.today).fullyPriced == false,
+                     "repricing preserves unavailable usage state as nil for known models without marking period as fully priced")
+
+        AgentPricing.install(shippedPrices)
+        repriceStore.reprice()
     }
 
     private static func timestamps(_ suite: TestSuite) {
