@@ -30,7 +30,6 @@ struct AgentLogState: Equatable {
     var lastTotal: AgentTokens?
     /// Codex runs the thread on the fast tier, which bills at a premium.
     var fast = false
-    var turnPromptChars = 0
 }
 
 enum AgentLogParser {
@@ -272,7 +271,6 @@ enum AgentLogParser {
             }
             state.turnOpen = true
             if let content = json["content"] as? String {
-                state.turnPromptChars = content.count
                 if let modelMatch = extractAntigravityModel(content) {
                     state.model = modelMatch
                 }
@@ -282,8 +280,6 @@ enum AgentLogParser {
                 if state.session.isEmpty, let sessionMatch = extractAntigravitySession(content) {
                     state.session = sessionMatch
                 }
-            } else {
-                state.turnPromptChars = 0
             }
             entries.append(.turnBegan(date))
             return entries
@@ -304,24 +300,12 @@ enum AgentLogParser {
                 }
             }
 
-            let content = json["content"] as? String ?? ""
-            let thinking = json["thinking"] as? String ?? ""
-            let toolChars = toolCalls.reduce(0) { $0 + "\($1)".count }
-            let outputChars = content.count + thinking.count + toolChars
-            let outputTokens = max(0, outputChars / 4)
-            let reasoningTokens = max(0, thinking.count / 4)
-
-            let promptTokens = max(0, state.turnPromptChars / 4)
-            let tokens = AgentTokens(input: promptTokens, cacheWrite: 0, cacheRead: 0,
-                                     output: outputTokens, reasoning: reasoningTokens)
-            let billable = AgentBillable(tokens: tokens)
-            let priced = AgentPricing.cost(billable, model: state.model)
             let key = "antigravity:\(state.session):\(step)"
             let record = AgentUsageRecord(
                 provider: .antigravity, date: date, model: state.model, project: state.project,
-                session: state.session, tokens: tokens, cost: priced.cost, savings: priced.savings
+                session: state.session, tokens: AgentTokens(), cost: nil, savings: 0
             )
-            let usageEntry = AgentLogEntry.usage(key: key, record: record, billable: billable)
+            let usageEntry = AgentLogEntry.usage(key: key, record: record, billable: AgentBillable())
             var entries: [AgentLogEntry] = []
             if !state.turnOpen {
                 state.turnOpen = true
@@ -332,12 +316,10 @@ enum AgentLogParser {
             let hasTools = !toolCalls.isEmpty
             if !hasTools && (status == "DONE" || status == nil) {
                 state.turnOpen = false
-                state.turnPromptChars = 0
                 entries.append(.turnEnded(date, completed: true, duration: nil))
                 return entries
             } else if status == "ERROR" {
                 state.turnOpen = false
-                state.turnPromptChars = 0
                 entries.append(.turnEnded(date, completed: false, duration: nil))
                 return entries
             } else {
@@ -351,7 +333,6 @@ enum AgentLogParser {
                     state.model = modelMatch
                 }
                 if state.turnOpen {
-                    state.turnPromptChars += content.count
                     return [.turnActive(date)]
                 }
             } else if state.turnOpen {

@@ -460,11 +460,11 @@ enum NotchAgentTests {
                                   now: Date(timeIntervalSince1970: 1_790_500_000))
         }
 
-        suite.expect(events == [.finished(provider: .antigravity, duration: 5.0, cost: 0.0, tokens: 73, project: "cool-app")],
+        suite.expect(events == [.finished(provider: .antigravity, duration: 5.0, cost: 0.0, tokens: 0, project: "cool-app")],
                      "a completed Antigravity turn emits a finished event with duration, cost, tokens, and project")
         suite.expect(store.live.isEmpty, "the live turn is closed after completion")
-        suite.expect(store.records.allSatisfy { $0.cost == nil } && !store.records.isEmpty,
-                     "usage with unspecified model preserves cost as unavailable")
+        suite.expect(store.records.allSatisfy { $0.cost == nil && $0.tokens == AgentTokens() } && !store.records.isEmpty,
+                     "unmeasured usage preserves cost and tokens as unavailable")
 
         // Model name extraction and pricing resolution
         var modelState = AgentLogState()
@@ -477,8 +477,19 @@ enum NotchAgentTests {
         suite.expect(AgentPricing.price(for: "gemini-3.8-flash")?.input == 0.75, "Gemini 3.8 Flash has published input price 0.75")
         suite.expect(AgentPricing.price(for: "gemini-3.8-flash")?.output == 3.75, "Gemini 3.8 Flash has published output price 3.75")
         suite.expect(AgentPricing.price(for: "gemini-3.8-flash")?.cacheRead == 0.075, "Gemini 3.8 Flash has published cache read price 0.075")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-pro")?.input == 1.25, "Gemini 2.5 Pro input price 1.25")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-pro")?.output == 10.0, "Gemini 2.5 Pro output price 10.0")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-pro")?.cacheRead == 0.125, "Gemini 2.5 Pro cache read price 0.125")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-pro")?.longContext?.above == 200_000, "Gemini 2.5 Pro long context above 200k")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-pro")?.longContext?.input == 2.0, "Gemini 2.5 Pro long context 2.0x input")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-pro")?.longContext?.output == 1.5, "Gemini 2.5 Pro long context 1.5x output")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-flash")?.input == 0.3, "Gemini 2.5 Flash input price 0.30")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-flash")?.output == 2.5, "Gemini 2.5 Flash output price 2.50")
+        suite.expect(AgentPricing.price(for: "gemini-2.5-flash")?.cacheRead == 0.03, "Gemini 2.5 Flash cache read price 0.03")
         suite.expect(AgentPricing.price(for: "Gemini 3.8 Pro") == nil, "Gemini 3.8 Pro unsupported model remains unknown")
         suite.expect(AgentPricing.price(for: "Gemini 2.5 Flash Lite") == nil, "Gemini 2.5 Flash Lite unsupported model remains unknown")
+        suite.expect(AgentPricing.price(for: "gemini-2.0-flash") == nil, "Gemini 2.0 Flash unsupported model remains unknown")
+        suite.expect(AgentPricing.price(for: "gemini-1.5-pro") == nil, "Gemini 1.5 Pro unsupported model remains unknown")
         suite.expect(AgentPricing.price(for: "gemini-ultra") == nil, "Gemini Ultra unsupported model remains unknown")
 
         // Canonical root relative filtering and session extraction
@@ -521,6 +532,21 @@ enum NotchAgentTests {
                            file: "brain/conv-2/transcript.jsonl", provider: .antigravity,
                            tracksTurns: true, modified: now)
         suite.expect(errEvents.isEmpty && errStore.live.isEmpty, "an error ends the turn without a finished event")
+
+        // Startup budget baseline: Antigravity records do not mark today's budget alert as handled
+        let today = Calendar.autoupdatingCurrent.startOfDay(for: now)
+        let antigravityRecord = AgentUsageRecord(provider: .antigravity, date: today.addingTimeInterval(100),
+                                                 model: "gemini-2.5-pro", project: "app", session: "s1",
+                                                 tokens: AgentTokens(), cost: 10.0, savings: 0)
+        let claudeRecord = AgentUsageRecord(provider: .claude, date: today.addingTimeInterval(200),
+                                            model: "claude-opus-5", project: "app", session: "s2",
+                                            tokens: AgentTokens(), cost: 1.0, savings: 0)
+        let startupRecords = [antigravityRecord, claudeRecord]
+        let budget = 5.0
+        let eligibleSpent = startupRecords.lazy.filter({ $0.provider != .antigravity && $0.date >= today })
+            .reduce(0.0, { $0 + ($1.cost ?? 0) })
+        suite.expect(eligibleSpent < budget,
+                     "startup budget baseline ignores Antigravity and does not suppress later Claude/Codex crossings")
     }
 
     private static func timestamps(_ suite: TestSuite) {

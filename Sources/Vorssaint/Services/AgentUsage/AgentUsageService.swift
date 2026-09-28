@@ -215,7 +215,7 @@ final class AgentUsageService: ObservableObject {
             // A budget already passed before launch is history, not news.
             let today = Calendar.autoupdatingCurrent.startOfDay(for: now)
             if let budget = NotchAgentSupport.dailyBudget(),
-               store.records.lazy.filter({ $0.date >= today }).reduce(0.0, { $0 + ($1.cost ?? 0) }) >= budget {
+               store.records.lazy.filter({ $0.provider != .antigravity && $0.date >= today }).reduce(0.0, { $0 + ($1.cost ?? 0) }) >= budget {
                 budgetDay = today
             }
             watch(roots)
