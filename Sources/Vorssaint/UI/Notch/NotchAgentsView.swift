@@ -285,7 +285,8 @@ private struct NotchAgentLimitsCard: View {
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .monospacedDigit()
                         } else {
-                            Text("\(todayUsage.requests) \(todayUsage.requests == 1 ? "turn" : "turns")")
+                            // One per planner response: a turn that calls tools counts more than once.
+                            Text(text.responses(todayUsage.requests))
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
@@ -301,7 +302,8 @@ private struct NotchAgentLimitsCard: View {
                     }
                 }
             } else {
-                Text(text.noSession).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                // A turn can be live before its first response is recorded.
+                Text(text.noResponsesToday).font(.system(size: 10.5)).foregroundStyle(.secondary)
                 lastUsed
             }
         } else {

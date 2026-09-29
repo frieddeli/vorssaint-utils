@@ -1178,6 +1178,14 @@ enum NotchAgentTests {
                      "elapsed time reads like a stopwatch")
         suite.expect(AgentFormat.day(Date(timeIntervalSince1970: 1_790_035_200), locale: english) == "Sep 22, 2026",
                      "the price list's day reads the same in every time zone")
+        let strings = FeatureStrings.notchAgents(.enUS)
+        suite.expect(strings.responses(1) == "1 response" && strings.responses(2) == "2 responses",
+                     "Antigravity counts responses, not turns")
+        suite.expect(AppLanguage.allCases.allSatisfy { language in
+            let text = FeatureStrings.notchAgents(language)
+            return text.responses(1).contains("1") && text.responses(3).contains("3")
+                && !text.noResponsesToday.isEmpty && text.noResponsesToday != text.noSession
+        }, "every language counts responses and says none were recorded without claiming no session is running")
     }
 }
 
