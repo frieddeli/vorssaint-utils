@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Vorssaint
 
 import Foundation
-import AppKit
 import SQLite3
 
 enum NotchAgentTests {
@@ -696,15 +695,6 @@ enum NotchAgentTests {
                      "aborted turn ends with completed: false")
         suite.expect(abortState.openCodeSessions["s_ab"]?.turnOpen == false, "turn is closed after abort")
 
-        // 13. OpenCode symbol SVG asset
-        let svgURL = URL(fileURLWithPath: "Resources/Images/opencode-symbol.svg")
-        suite.expect(FileManager.default.fileExists(atPath: svgURL.path), "opencode-symbol.svg exists in Resources/Images")
-        if let image = NSImage(contentsOf: svgURL) {
-            suite.expect(image.size.width > 0 && image.size.height > 0, "opencode-symbol.svg loads as a valid image")
-        } else {
-            suite.expect(false, "opencode-symbol.svg could not be loaded as NSImage")
-        }
-
         // 14. Model name parsing & formatting
         suite.expect(AgentPricing.displayName("nvidia/nemotron-3-super-120b-a12b") == "Nemotron 3 Super 120B A12B"
                         && AgentPricing.displayName("muse-spark-1.3-contributor-free") == "Muse Spark 1.3 Contributor Free"
@@ -753,6 +743,13 @@ enum NotchAgentTests {
         openCodeRepricing(suite, now: now)
         openCodeSubagents(suite, now: now)
         openCodeDatabaseReplacement(suite, now: now)
+        openCodeReadWindow(suite, now: now)
+        openCodeNullColumns(suite)
+        openCodeDiscovery(suite)
+        openCodeEmptyReplies(suite, now: now)
+        openCodeFinishes(suite, now: now)
+        openCodeAgentPrompts(suite, now: now)
+        openCodeParts(suite, now: now)
     }
 
     private static func openCodeReasoningTokens(_ suite: TestSuite, now: Date) {
@@ -1180,6 +1177,295 @@ enum NotchAgentTests {
                      "database replacement retires and forgets old db1 live turn s1")
         suite.expect(store.turns["\(activePath)#s2"] != nil,
                      "only db2 session s2 is present in live turns after database replacement")
+    }
+
+    // MARK: OpenCode database helpers
+
+    /// A database laid out like OpenCode's, in a folder of its own.
+    private static func openCodeDatabase(_ sql: String) -> (folder: URL, path: String)? {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "vorss-opencode-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let path = folder.appending(path: "opencode.db").path
+        guard openCodeExec(path, """
+        CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        \(sql)
+        """) else { return nil }
+        return (folder, path)
+    }
+
+    @discardableResult
+    private static func openCodeExec(_ path: String, _ sql: String) -> Bool {
+        var db: OpaquePointer?
+        guard sqlite3_open(path, &db) == SQLITE_OK else { return false }
+        defer { sqlite3_close(db) }
+        return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
+    }
+
+    private static func openCodeRead(_ cursor: AgentLogCursor, since horizon: Date = .distantPast) -> [[String: Any]] {
+        var rows: [[String: Any]] = []
+        AgentOpenCodeReader.readAppended(cursor, since: horizon) { data in
+            if let row = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { rows.append(row) }
+        }
+        return rows
+    }
+
+    private static func ended(_ entries: [AgentLogEntry]) -> Bool {
+        entries.contains { if case .turnEnded = $0 { return true }; return false }
+    }
+
+    private static func usage(_ entries: [AgentLogEntry]) -> Bool {
+        entries.contains { if case .usage = $0 { return true }; return false }
+    }
+
+    // MARK: OpenCode reading window
+
+    private static func openCodeReadWindow(_ suite: TestSuite, now: Date) {
+        guard let (folder, path) = openCodeDatabase("""
+        INSERT INTO session VALUES ('s_a', '/code/a', NULL, 1780000000000, 1780000000000);
+        INSERT INTO session VALUES ('s_b', '/code/b', NULL, 1790088000000, 1790088000000);
+        INSERT INTO message VALUES ('m_old', 's_a', 1780000000000, 1780000000000, '{"role":"assistant","tokens":{"input":10,"output":5},"finish":"stop"}');
+        INSERT INTO message VALUES ('m_new', 's_b', 1790088000000, 1790088000000, '{"role":"user"}');
+        """) else {
+            suite.expect(false, "window database opens")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let cursor = AgentLogCursor(path: path, provider: .opencode)
+        let first = openCodeRead(cursor, since: Date(timeIntervalSince1970: 1_789_000_000))
+        suite.expect(first.map { $0["id"] as? String } == ["m_new"] && cursor.offset == 1_790_088_000_000,
+                     "a first read starts at the horizon instead of the database's first message")
+
+        openCodeExec(path, """
+        INSERT INTO message VALUES ('m_b1', 's_b', 1790088010000, 1790088010000, '{"role":"assistant","parentID":"m_new","tokens":{"input":10,"output":5}}');
+        """)
+        let second = openCodeRead(cursor, since: Date(timeIntervalSince1970: 1_789_000_000))
+        suite.expect(second.map { $0["id"] as? String } == ["m_b1"] && cursor.offset == 1_790_088_010_000,
+                     "a newer row from another session moves the cursor on")
+
+        // Stamped long before it is saved, as when its attachments take a while.
+        openCodeExec(path, """
+        INSERT INTO message VALUES ('p_a', 's_a', 1790087000000, 1790088012000, '{"role":"user"}');
+        """)
+        let late = openCodeRead(cursor, since: Date(timeIntervalSince1970: 1_789_000_000))
+        suite.expect(late.map { $0["id"] as? String } == ["p_a"],
+                     "a prompt saved after a newer row was read is still read, and nothing already read repeats")
+        var state = AgentLogState()
+        let entries = late.compactMap { try? JSONSerialization.data(withJSONObject: $0) }
+            .flatMap { AgentLogParser.parseOpenCode($0, state: &state, now: now) }
+        suite.expect(entries == [.turnBegan(Date(timeIntervalSince1970: 1_790_087_000))]
+                        && state.openCodeSessions["s_a"]?.turnOpen == true,
+                     "the late prompt opens its session's turn")
+        suite.expect(openCodeRead(cursor, since: Date(timeIntervalSince1970: 1_789_000_000)).isEmpty,
+                     "a read with nothing new hands over nothing")
+    }
+
+    private static func openCodeNullColumns(_ suite: TestSuite) {
+        guard let (folder, path) = openCodeDatabase("""
+        INSERT INTO session VALUES ('s_n', NULL, NULL, 1790088000000, 1790088000000);
+        INSERT INTO message VALUES (NULL, 's_n', 1790088000000, 1790088000000, '{"role":"user"}');
+        INSERT INTO message VALUES ('n_data', 's_n', 1790088001000, 1790088001000, NULL);
+        INSERT INTO message VALUES ('n_created', 's_n', NULL, 1790088002000, '{"role":"user"}');
+        INSERT INTO message VALUES ('n_updated', 's_n', 1790088003000, NULL, '{"role":"user"}');
+        INSERT INTO message VALUES ('n_garbled', 's_n', 1790088004000, 1790088004000, 'not json');
+        INSERT INTO message VALUES ('n_ok', 's_n', 1790088005000, 1790088005000, '{"role":"assistant","tokens":{"input":1}}');
+        """) else {
+            suite.expect(false, "null column database opens")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let rows = openCodeRead(AgentLogCursor(path: path, provider: .opencode))
+        suite.expect(rows.map { $0["id"] as? String } == ["n_updated", "n_ok"]
+                        && rows.allSatisfy { $0["directory"] as? String == "" },
+                     "rows missing a value are skipped, an empty folder or update time reads as none")
+    }
+
+    private static func openCodeDiscovery(_ suite: TestSuite) {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "vorss-discover-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let root = AgentLogRoot(provider: .opencode, url: folder)
+        let nested = folder.appending(path: "snapshot/project/opencode.db")
+        try? FileManager.default.createDirectory(at: nested.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: nested.path, contents: Data())
+        let horizon = Date().addingTimeInterval(-86_400)
+        suite.expect(AgentLogReader.discover([root], since: horizon).isEmpty,
+                     "a database inside the data folder's other contents is not OpenCode's")
+        let database = AgentLogRoot.canonical(folder).appending(path: "opencode.db")
+        FileManager.default.createFile(atPath: database.path, contents: Data())
+        let found = AgentLogReader.discover([AgentLogRoot(provider: .opencode, url: AgentLogRoot.canonical(folder))],
+                                            since: horizon)
+        suite.expect(found.map(\.path) == [database.path] && found.first?.provider == .opencode,
+                     "OpenCode's database is found at its known path")
+    }
+
+    // MARK: OpenCode turns
+
+    private static func openCodeEmptyReplies(_ suite: TestSuite, now: Date) {
+        var state = AgentLogState()
+        let store = AgentUsageStore()
+        let prompt = AgentLogParser.parseOpenCode(line(#"{"id":"u_sh","session_id":"s_e","time_created":1790090000,"role":"user"}"#),
+                                                  state: &state, now: now)
+        let started = AgentLogParser.parseOpenCode(line(#"{"id":"a_sh","parentID":"u_sh","session_id":"s_e","time_created":1790090001,"role":"assistant","model_id":"claude-3-5-sonnet","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1790090001000}}"#),
+                                                   state: &state, now: now)
+        suite.expect(started == [.turnActive(Date(timeIntervalSince1970: 1_790_090_001))],
+                     "a reply saved before its answer arrives is activity without usage")
+        let shell = AgentLogParser.parseOpenCode(line(#"{"id":"a_sh","parentID":"u_sh","session_id":"s_e","time_created":1790090001,"role":"assistant","model_id":"claude-3-5-sonnet","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1790090001000,"completed":1790090004000}}"#),
+                                                 state: &state, now: now)
+        suite.expect(shell == [.turnEnded(Date(timeIntervalSince1970: 1_790_090_004), completed: true, duration: 4)],
+                     "a shell command's reply completes without a finish and ends the turn without usage")
+
+        _ = AgentLogParser.parseOpenCode(line(#"{"id":"u_f","session_id":"s_e","time_created":1790090010,"role":"user"}"#),
+                                         state: &state, now: now)
+        let failed = AgentLogParser.parseOpenCode(line(#"{"id":"a_f","parentID":"u_f","session_id":"s_e","time_created":1790090011,"role":"assistant","cost":0,"tokens":{"input":0,"output":0},"error":{"name":"APIError"},"time":{"completed":1790090012000}}"#),
+                                                  state: &state, now: now)
+        suite.expect(failed == [.turnEnded(Date(timeIntervalSince1970: 1_790_090_012), completed: false, duration: 2)],
+                     "a failed request ends the turn unfinished and stores nothing")
+
+        for entries in [prompt, started, shell, failed] {
+            store.apply(entries, file: "db#s_e", provider: .opencode, tracksTurns: true, modified: now, now: now)
+        }
+        suite.expect(store.records.isEmpty, "replies without tokens or cost leave no usage record")
+        suite.expect(AgentPricing.cost(AgentBillable(), model: "claude-3-5-sonnet").cost == 0,
+                     "the shared price list prices no tokens at zero, as for Claude and Codex")
+    }
+
+    private static func openCodeFinishes(_ suite: TestSuite, now: Date) {
+        func turn(_ finish: String, extra: String = "") -> [AgentLogEntry] {
+            var state = AgentLogState()
+            _ = AgentLogParser.parseOpenCode(line(#"{"id":"u","session_id":"s_f","time_created":1790090100,"role":"user"}"#),
+                                             state: &state, now: now)
+            return AgentLogParser.parseOpenCode(line(#"{"id":"a","parentID":"u","session_id":"s_f","time_created":1790090101,"role":"assistant","tokens":{"input":10,"output":5},"finish":"\#(finish)"\#(extra),"time":{"completed":1790090105000}}"#),
+                                                state: &state, now: now)
+        }
+        suite.expect(turn("length").contains(.turnEnded(Date(timeIntervalSince1970: 1_790_090_105), completed: true, duration: 5)),
+                     "a reply cut at the output limit ends the turn")
+        suite.expect(ended(turn("content-filter")) && ended(turn("other")) && ended(turn("stop")),
+                     "every finish but tool calls and unknown ends the turn")
+        suite.expect(!ended(turn("tool-calls")) && !ended(turn("unknown")),
+                     "tool calls and an unknown finish keep the turn going")
+        suite.expect(!ended(turn("stop", extra: #","tool_calls":true"#)),
+                     "a reply that still holds tool calls keeps the turn going whatever its finish")
+    }
+
+    private static func openCodeAgentPrompts(_ suite: TestSuite, now: Date) {
+        // An automatic compaction in the middle of a task: OpenCode asks for
+        // it, saves the summary with a normal finish and asks to continue.
+        var state = AgentLogState()
+        let store = AgentUsageStore()
+        store.reportsTransitions = true
+        var events: [AgentUsageEvent] = []
+        var all: [AgentLogEntry] = []
+        func feed(_ json: String, at seconds: TimeInterval) -> [AgentLogEntry] {
+            let entries = AgentLogParser.parseOpenCode(line(json), state: &state, now: now)
+            all += entries
+            events += store.apply(entries, file: "db#s_c", provider: .opencode, tracksTurns: true, modified: now,
+                                  now: Date(timeIntervalSince1970: seconds))
+            return entries
+        }
+        _ = feed(#"{"id":"p","session_id":"s_c","time_created":1790090200,"directory":"/code/app","role":"user"}"#, at: 1_790_090_200)
+        _ = feed(#"{"id":"a1","parentID":"p","session_id":"s_c","time_created":1790090201,"role":"assistant","cost":0.01,"tokens":{"input":100,"output":10},"finish":"tool-calls"}"#, at: 1_790_090_205)
+        let request = feed(#"{"id":"c","session_id":"s_c","time_created":1790090210,"role":"user"}"#, at: 1_790_090_210)
+        suite.expect(request == [.turnActive(Date(timeIntervalSince1970: 1_790_090_210))],
+                     "OpenCode's own compaction request inside a turn is activity")
+        let summary = feed(#"{"id":"s","parentID":"c","session_id":"s_c","time_created":1790090211,"role":"assistant","summary":true,"auto_compaction":true,"cost":0.02,"tokens":{"input":200,"output":20},"finish":"stop","time":{"completed":1790090220000}}"#, at: 1_790_090_220)
+        suite.expect(!ended(summary), "the summary of an automatic compaction does not end the task")
+        let follow = feed(#"{"id":"u","session_id":"s_c","time_created":1790090221,"role":"user"}"#, at: 1_790_090_221)
+        suite.expect(follow == [.turnActive(Date(timeIntervalSince1970: 1_790_090_221))],
+                     "the follow up asking to continue is activity")
+        let reply = feed(#"{"id":"r","parentID":"u","session_id":"s_c","time_created":1790090222,"role":"assistant","cost":0.03,"tokens":{"input":300,"output":30},"finish":"stop","time":{"completed":1790090230000}}"#, at: 1_790_090_230)
+        suite.expect(reply.contains(.turnEnded(Date(timeIntervalSince1970: 1_790_090_230), completed: true, duration: 30)),
+                     "the reply to the follow up ends the whole task")
+        suite.expect(all.filter { if case .turnBegan = $0 { return true }; return false }.count == 1,
+                     "a compaction in the middle of a task keeps one turn")
+        suite.expect(events.count == 1 && events.first.map {
+            if case .finished(_, let duration, let cost, let tokens, _) = $0 {
+                return duration == 30 && abs(cost - 0.06) < 0.000001 && tokens == 660
+            }
+            return false
+        } == true, "one finish notice counts the whole task")
+
+        // A manual compaction is a turn of its own, ended by its summary.
+        var manual = AgentLogState()
+        _ = AgentLogParser.parseOpenCode(line(#"{"id":"mc","session_id":"s_m","time_created":1790090300,"role":"user"}"#),
+                                         state: &manual, now: now)
+        let manualSummary = AgentLogParser.parseOpenCode(line(#"{"id":"ms","parentID":"mc","session_id":"s_m","time_created":1790090301,"role":"assistant","summary":true,"tokens":{"input":10,"output":5},"finish":"stop"}"#),
+                                                         state: &manual, now: now)
+        suite.expect(ended(manualSummary), "the summary of a compaction asked for by hand ends that turn")
+
+        // A command's subtask: the reply holding it has no usage and calls a
+        // tool, then OpenCode asks for a summary of what it returned.
+        var command = AgentLogState()
+        var commandEntries: [AgentLogEntry] = []
+        for json in [
+            #"{"id":"cp","session_id":"s_t","time_created":1790090400,"role":"user"}"#,
+            #"{"id":"ct","parentID":"cp","session_id":"s_t","time_created":1790090401,"role":"assistant","tokens":{"input":0,"output":0},"finish":"tool-calls","time":{"completed":1790090420000}}"#,
+            #"{"id":"cq","session_id":"s_t","time_created":1790090421,"role":"user"}"#,
+            #"{"id":"cr","parentID":"cq","session_id":"s_t","time_created":1790090422,"role":"assistant","tokens":{"input":50,"output":5},"finish":"stop","time":{"completed":1790090430000}}"#,
+        ] {
+            let entries = AgentLogParser.parseOpenCode(line(json), state: &command, now: now)
+            if json.contains(#""id":"ct""#) {
+                suite.expect(!ended(entries) && !usage(entries), "the reply holding a subtask neither ends the turn nor counts usage")
+            }
+            if json.contains(#""id":"cq""#) {
+                suite.expect(entries == [.turnActive(Date(timeIntervalSince1970: 1_790_090_421))],
+                             "the summary prompt after a command's subtask is activity")
+            }
+            commandEntries += entries
+        }
+        suite.expect(commandEntries.filter { if case .turnEnded = $0 { return true }; return false }
+                        == [.turnEnded(Date(timeIntervalSince1970: 1_790_090_430), completed: true, duration: 30)],
+                     "a command subtask in the middle of a task ends only with the task")
+
+        // A prompt sent while OpenCode works joins the running loop.
+        var queued = AgentLogState()
+        _ = AgentLogParser.parseOpenCode(line(#"{"id":"q1","session_id":"s_q","time_created":1790090500,"role":"user"}"#),
+                                         state: &queued, now: now)
+        let second = AgentLogParser.parseOpenCode(line(#"{"id":"q2","session_id":"s_q","time_created":1790090505,"role":"user"}"#),
+                                                  state: &queued, now: now)
+        let early = AgentLogParser.parseOpenCode(line(#"{"id":"qa","parentID":"q1","session_id":"s_q","time_created":1790090506,"role":"assistant","tokens":{"input":5},"finish":"stop"}"#),
+                                                 state: &queued, now: now)
+        let last = AgentLogParser.parseOpenCode(line(#"{"id":"qb","parentID":"q2","session_id":"s_q","time_created":1790090510,"role":"assistant","tokens":{"input":5},"finish":"stop"}"#),
+                                                state: &queued, now: now)
+        suite.expect(second == [.turnActive(Date(timeIntervalSince1970: 1_790_090_505))] && !ended(early)
+                        && last.contains(.turnEnded(Date(timeIntervalSince1970: 1_790_090_510), completed: true, duration: 10)),
+                     "a prompt sent while the agent works joins its turn, which ends with the reply to it")
+    }
+
+    private static func openCodeParts(_ suite: TestSuite, now: Date) {
+        guard let (folder, path) = openCodeDatabase("""
+        INSERT INTO session VALUES ('s_p', '/code/app', NULL, 1790090600000, 1790090600000);
+        INSERT INTO message VALUES ('u1', 's_p', 1790090600000, 1790090600000, '{"role":"user"}');
+        INSERT INTO message VALUES ('a_tool', 's_p', 1790090601000, 1790090601000, '{"role":"assistant","parentID":"u1","finish":"stop"}');
+        INSERT INTO message VALUES ('a_provider', 's_p', 1790090602000, 1790090602000, '{"role":"assistant","parentID":"u1","finish":"stop"}');
+        INSERT INTO message VALUES ('a_orphan', 's_p', 1790090603000, 1790090603000, '{"role":"assistant","parentID":"u1","finish":"stop"}');
+        INSERT INTO message VALUES ('a_calls', 's_p', 1790090604000, 1790090604000, '{"role":"assistant","parentID":"u1","finish":"tool-calls"}');
+        INSERT INTO message VALUES ('c_auto', 's_p', 1790090605000, 1790090605000, '{"role":"user"}');
+        INSERT INTO message VALUES ('s_auto', 's_p', 1790090606000, 1790090606000, '{"role":"assistant","parentID":"c_auto","summary":true,"finish":"stop"}');
+        INSERT INTO message VALUES ('c_hand', 's_p', 1790090607000, 1790090607000, '{"role":"user"}');
+        INSERT INTO message VALUES ('s_hand', 's_p', 1790090608000, 1790090608000, '{"role":"assistant","parentID":"c_hand","summary":true,"finish":"stop"}');
+        INSERT INTO part VALUES ('p0', 'a_tool', 's_p', 0, 0, 'not json');
+        INSERT INTO part VALUES ('p1', 'a_tool', 's_p', 0, 0, '{"type":"tool","state":{"status":"completed"}}');
+        INSERT INTO part VALUES ('p2', 'a_provider', 's_p', 0, 0, '{"type":"tool","metadata":{"providerExecuted":true},"state":{"status":"completed"}}');
+        INSERT INTO part VALUES ('p3', 'a_orphan', 's_p', 0, 0, '{"type":"tool","state":{"status":"error","metadata":{"interrupted":true}}}');
+        INSERT INTO part VALUES ('p4', 'a_calls', 's_p', 0, 0, '{"type":"tool","state":{"status":"running"}}');
+        INSERT INTO part VALUES ('p5', 'c_auto', 's_p', 0, 0, '{"type":"compaction","auto":true}');
+        INSERT INTO part VALUES ('p6', 'c_hand', 's_p', 0, 0, '{"type":"compaction","auto":false}');
+        """) else {
+            suite.expect(false, "parts database opens")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let rows = openCodeRead(AgentLogCursor(path: path, provider: .opencode))
+        let flags = Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+            (row["id"] as? String).map { ($0, (row["tool_calls"] as? Bool == true, row["auto_compaction"] as? Bool == true)) }
+        })
+        suite.expect(rows.count == 9, "every message is read beside a part that is not JSON")
+        suite.expect(flags["a_tool"]?.0 == true && flags["a_provider"]?.0 == false && flags["a_orphan"]?.0 == false,
+                     "a finished reply still holding a tool call is told apart from provider and abandoned calls")
+        suite.expect(flags["s_auto"]?.1 == true && flags["s_hand"]?.1 == false,
+                     "a summary of an automatic compaction is told apart from one asked for by hand")
     }
 
     private static func timestamps(_ suite: TestSuite) {

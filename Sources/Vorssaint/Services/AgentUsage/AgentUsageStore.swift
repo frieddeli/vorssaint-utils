@@ -214,11 +214,6 @@ final class AgentUsageStore {
         summary.invalidate()
         for position in records.indices {
             guard !records[position].reportedCost else { continue }
-            guard !billables[position].isEmpty else {
-                records[position].cost = nil
-                records[position].savings = 0
-                continue
-            }
             let priced = AgentPricing.cost(billables[position], model: records[position].model)
             records[position].cost = priced.cost
             records[position].savings = priced.savings
@@ -300,7 +295,9 @@ final class AgentLogCursor {
     let tracksTurns: Bool
     /// The session log a Claude subagent works for.
     let parent: String?
-    var boundaryRevisions: Set<String> = []
+    /// OpenCode rows read within the look-back, by id, with when each was
+    /// saved and the revision handed over.
+    var recentRows: [String: (stamp: Int64, revision: Int)] = [:]
     var offset: UInt64 = 0
     var identity: UInt64 = 0
     var pending = Data()
@@ -333,7 +330,7 @@ enum AgentLogReader {
 
     static func isLog(_ path: String) -> Bool {
         let name = (path as NSString).lastPathComponent
-        if name == "opencode.db" || name == "opencode.db-wal" { return true }
+        if name == AgentOpenCodeReader.database || name == AgentOpenCodeReader.database + "-wal" { return true }
         return path.hasSuffix(".jsonl")
     }
 
@@ -344,22 +341,20 @@ enum AgentLogReader {
         var found: [(path: String, provider: AgentProvider, modified: Date, subagent: Bool)] = []
         let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
         for root in roots where root.exists {
+            // OpenCode keeps its database beside the snapshots, clones and
+            // logs of its data folder, which are never walked.
+            if root.provider == .opencode {
+                let path = root.url.appending(path: AgentOpenCodeReader.database).path
+                if let modified = AgentOpenCodeReader.modified(path), modified >= horizon {
+                    found.append((path, root.provider, modified, false))
+                }
+                continue
+            }
             guard let enumerator = FileManager.default.enumerator(at: root.url, includingPropertiesForKeys: keys,
                                                                   options: [.skipsPackageDescendants]) else { continue }
-            for case let url as URL in enumerator where isLog(url.path) {
-                // WAL files trigger refreshes but are not separate session logs
-                if url.lastPathComponent.hasSuffix("-wal") { continue }
-                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
-                var modified = values.contentModificationDate ?? .distantPast
-                if root.provider == .opencode {
-                    var walInfo = stat()
-                    if stat(url.path + "-wal", &walInfo) == 0 {
-                        let walDate = Date(timeIntervalSince1970: TimeInterval(walInfo.st_mtimespec.tv_sec)
-                                           + TimeInterval(walInfo.st_mtimespec.tv_nsec) / 1_000_000_000)
-                        modified = max(modified, walDate)
-                    }
-                }
-                guard modified >= horizon else { continue }
+            for case let url as URL in enumerator where url.path.hasSuffix(".jsonl") {
+                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
+                      let modified = values.contentModificationDate, modified >= horizon else { continue }
                 let subagent = root.provider == .claude && AgentLogCursor.parent(of: url.path) != nil
                 found.append((url.path, root.provider, modified, subagent))
             }
@@ -370,11 +365,13 @@ enum AgentLogReader {
 
     /// Reads what was appended since the last call and hands over each
     /// complete line. A replaced or truncated file starts over.
-    static func readAppended(_ cursor: AgentLogCursor, shouldContinue: () -> Bool = { true },
-                             line: (Data) -> Void) {
+    /// A database has no files to leave out, so its first read starts at
+    /// `horizon` instead.
+    static func readAppended(_ cursor: AgentLogCursor, since horizon: Date = .distantPast,
+                             shouldContinue: () -> Bool = { true }, line: (Data) -> Void) {
         guard shouldContinue() else { return }
         if cursor.provider == .opencode {
-            AgentOpenCodeReader.readAppended(cursor, shouldContinue: shouldContinue, line: line)
+            AgentOpenCodeReader.readAppended(cursor, since: horizon, shouldContinue: shouldContinue, line: line)
             return
         }
         var info = stat()
@@ -386,7 +383,6 @@ enum AgentLogReader {
         if identity != cursor.identity || size < cursor.offset {
             cursor.identity = identity
             cursor.offset = 0
-            cursor.boundaryRevisions.removeAll()
             cursor.pending = Data()
             cursor.discarding = false
             cursor.state = AgentLogState()

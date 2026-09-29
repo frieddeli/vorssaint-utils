@@ -350,15 +350,6 @@ enum AgentMarks {
     }
 
     private static func lookUp(_ provider: AgentProvider) -> Mark? {
-        if provider == .opencode {
-            if let url = Bundle.main.url(forResource: "opencode-symbol", withExtension: "svg", subdirectory: "Images") ??
-                         Bundle.main.url(forResource: "opencode-symbol", withExtension: "svg") ??
-                         (FileManager.default.fileExists(atPath: "Resources/Images/opencode-symbol.svg") ? URL(fileURLWithPath: "Resources/Images/opencode-symbol.svg") : nil),
-               let image = NSImage(contentsOf: url) {
-                image.isTemplate = true
-                return .template(image)
-            }
-        }
         for identifier in provider.appIdentifiers {
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) else { continue }
             if let bundle = Bundle(url: url) {
@@ -381,26 +372,21 @@ private extension AgentProvider {
         switch self {
         case .claude: return [AgentClaudeAppUsage.bundleIdentifier]
         case .codex: return ["com.openai.codex", "com.openai.chat"]
-        case .opencode: return [
-            "ai.opencode.desktop",
-            "ai.opencode.desktop.beta",
-            "ai.opencode.desktop.dev",
-            "ai.opencode.app",
-            "com.anomaly.opencode"
-        ]
+        case .opencode: return ["ai.opencode.desktop", "ai.opencode.desktop.beta", "ai.opencode.desktop.dev"]
         }
     }
 
     /// The menu bar images keep a margin; the spark's thin rays need more
     /// of the box than the knot to look the same size.
-    var markScale: CGFloat { self == .claude ? 1.45 : (self == .opencode ? 1.25 : 1.2) }
+    var markScale: CGFloat { self == .claude ? 1.45 : 1.2 }
 
     /// What those apps name the mark they show in the menu bar.
     var menuBarImageNames: [String] {
         switch self {
         case .claude: return ["TrayIconTemplate"]
         case .codex: return ["chatgptTemplate"]
-        case .opencode: return ["opencodeTemplate"]
+        // The OpenCode app shows nothing in the menu bar; its icon stands in.
+        case .opencode: return []
         }
     }
 }

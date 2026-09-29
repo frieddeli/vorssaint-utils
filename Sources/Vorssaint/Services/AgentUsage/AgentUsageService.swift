@@ -250,23 +250,14 @@ final class AgentUsageService: ObservableObject {
         var changed = false
         for (path, cursor) in cursors
         where working.contains(path) || working.contains(where: { $0.hasPrefix(path + "#") }) || now.timeIntervalSince(cursor.modified) < window {
-            var info = stat()
-            let exists = stat(path, &info) == 0
             if cursor.provider == .opencode {
-                guard exists else {
-                    if read(path, provider: cursor.provider) { changed = true }
-                    continue
-                }
-                var walInfo = stat()
-                let walExists = stat(path + "-wal", &walInfo) == 0
-                let currentMod = max(
-                    Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1_000_000_000),
-                    walExists ? Date(timeIntervalSince1970: TimeInterval(walInfo.st_mtimespec.tv_sec) + TimeInterval(walInfo.st_mtimespec.tv_nsec) / 1_000_000_000) : .distantPast
-                )
-                guard currentMod > cursor.modified else { continue }
+                // A database changes in place: its write-ahead log grows instead.
+                if let modified = AgentOpenCodeReader.modified(path), modified <= cursor.modified { continue }
                 if read(path, provider: cursor.provider) { changed = true }
                 continue
             }
+            var info = stat()
+            let exists = stat(path, &info) == 0
             guard !exists || UInt64(max(0, info.st_size)) != cursor.offset
                     || UInt64(info.st_ino) != cursor.identity else { continue }
             if read(path, provider: cursor.provider) { changed = true }
@@ -287,7 +278,8 @@ final class AgentUsageService: ObservableObject {
         cursors[path] = cursor
         var changed = false
         let now = Date()
-        AgentLogReader.readAppended(cursor, shouldContinue: { !cancellation.isCancelled }) { line in
+        AgentLogReader.readAppended(cursor, since: now.addingTimeInterval(-Self.horizon),
+                                    shouldContinue: { !cancellation.isCancelled }) { line in
             // Apply in log order while the chunk is alive instead of retaining
             // every parsed entry until a potentially multi-gigabyte file ends.
             let entries: [AgentLogEntry]
@@ -331,7 +323,9 @@ final class AgentUsageService: ObservableObject {
         } else {
             for path in Set(paths) where AgentLogReader.isLog(path) {
                 let actualPath = path.hasSuffix("-wal") ? String(path.dropLast(4)) : path
-                guard let root = watchedRoots.first(where: { actualPath.hasPrefix($0.url.path + "/") }) else { continue }
+                guard let root = watchedRoots.first(where: { actualPath.hasPrefix($0.url.path + "/") }),
+                      root.provider != .opencode
+                        || actualPath == root.url.appending(path: AgentOpenCodeReader.database).path else { continue }
                 if read(actualPath, provider: root.provider) { changed = true }
             }
         }

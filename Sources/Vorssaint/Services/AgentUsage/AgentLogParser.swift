@@ -43,8 +43,8 @@ struct OpenCodeSessionState: Equatable {
     var model = ""
     var turnOpen = false
     var turnStarted: Date?
-    var lastUserMessageID = ""
     var activeUserMessageID = ""
+    var seenUserMessageIDs: Set<String> = []
     var completedAssistantMessageIDs: Set<String> = []
     var completedUserMessageIDs: Set<String> = []
 }
@@ -301,19 +301,23 @@ enum AgentLogParser {
         switch role {
         case "user":
             if !id.isEmpty {
-                if sessionState.lastUserMessageID == id || sessionState.completedUserMessageIDs.contains(id) {
-                    return []
-                }
-                sessionState.lastUserMessageID = id
+                // A prompt read again, as when its summary is saved, is no new one.
+                if sessionState.seenUserMessageIDs.contains(id) { return [] }
+                remember(id, in: &sessionState.seenUserMessageIDs)
                 sessionState.activeUserMessageID = id
             }
+            // OpenCode writes prompts of its own in the middle of a task: the
+            // request that starts a compaction, the follow up after one, the
+            // summary after a command's subtask. A prompt sent while it works
+            // joins the running loop too, so inside a turn each is activity.
             var entries: [AgentLogEntry] = []
             if sessionState.turnOpen {
-                let duration = sessionState.turnStarted.map { max(0, date.timeIntervalSince($0)) }
-                entries.append(.turnEnded(date, completed: true, duration: duration))
+                entries.append(.turnActive(date))
+            } else {
+                sessionState.turnOpen = true
+                sessionState.turnStarted = date
+                entries.append(.turnBegan(date))
             }
-            sessionState.turnOpen = true
-            sessionState.turnStarted = date
             let userModel = json["model_id"] as? String
                 ?? json["modelID"] as? String
                 ?? (json["model"] as? [String: Any])?["modelID"] as? String
@@ -326,7 +330,6 @@ enum AgentLogParser {
             state.project = sessionState.project
             state.model = sessionState.model
             state.turnOpen = true
-            entries.append(.turnBegan(date))
             return entries
 
         case "assistant":
@@ -349,26 +352,19 @@ enum AgentLogParser {
                                      output: output + reasoning, reasoning: reasoning)
             let billable = AgentBillable(tokens: tokens)
             let priced = AgentPricing.cost(billable, model: sessionState.model)
-            let reportedCostVal = (json["cost"] as? NSNumber)?.doubleValue
+            let reportedCostVal = (json["cost"] as? NSNumber)?.doubleValue ?? 0
             let cost: Double?
             let isReported: Bool
             if let calculated = priced.cost {
                 cost = calculated
                 isReported = false
-            } else if let reportedCostVal, reportedCostVal > 0 {
+            } else if reportedCostVal > 0 {
                 cost = reportedCostVal
                 isReported = true
             } else {
                 cost = nil
                 isReported = false
             }
-
-            let key = "opencode:\(sessionID):\(id.isEmpty ? "\(date.timeIntervalSince1970)" : id)"
-            let record = AgentUsageRecord(
-                provider: .opencode, date: date, model: sessionState.model, project: sessionState.project,
-                session: sessionID, tokens: tokens, cost: cost, savings: priced.savings,
-                reportedCost: isReported
-            )
 
             let parentID = json["parentID"] as? String ?? ""
             let isAlreadyCompleted = (!id.isEmpty && sessionState.completedAssistantMessageIDs.contains(id))
@@ -381,15 +377,40 @@ enum AgentLogParser {
                 sessionState.turnStarted = date
                 entries.append(.turnBegan(date))
             }
-            entries.append(.usage(key: key, record: record, billable: billable))
+            // A reply is saved before its answer arrives, and a shell command
+            // run from the prompt, the reply that hands work to a subtask and
+            // a request that failed or was stopped never hold any usage.
+            if tokens.total > 0 || reportedCostVal > 0 {
+                let key = "opencode:\(sessionID):\(id.isEmpty ? "\(date.timeIntervalSince1970)" : id)"
+                let record = AgentUsageRecord(
+                    provider: .opencode, date: date, model: sessionState.model, project: sessionState.project,
+                    session: sessionID, tokens: tokens, cost: cost, savings: priced.savings,
+                    reportedCost: isReported
+                )
+                entries.append(.usage(key: key, record: record, billable: billable))
+            }
 
+            // OpenCode's loop goes on after tool calls, after a reply that
+            // still holds calls whatever its finish says, and after the
+            // summary of a compaction it started on its own. Any other finish
+            // stops it, as does an error or a reply that completes without a
+            // finish, like a shell command's.
             let finish = json["finish"] as? String
-            let hasError = json["error"] != nil
+            let hasError = json["error"].map { !($0 is NSNull) } ?? false
+            let timeCompleted = (json["time"] as? [String: Any])?["completed"]
+            let ends: Bool
+            if hasError {
+                ends = true
+            } else if let finish {
+                ends = !["tool-calls", "unknown"].contains(finish)
+                    && json["tool_calls"] as? Bool != true && json["auto_compaction"] as? Bool != true
+            } else {
+                ends = seconds(timeCompleted) != nil
+            }
 
-            if finish == "stop" || finish == "abort" || finish == "end_turn" || hasError {
+            if ends {
                 if !isAlreadyCompleted && matchesActivePrompt && sessionState.turnOpen {
-                    let timeCompleted = (json["time"] as? [String: Any])?["completed"] ?? json["time_updated"]
-                    let endDate = seconds(timeCompleted) ?? date
+                    let endDate = seconds(timeCompleted) ?? seconds(json["time_updated"]) ?? date
                     var duration: TimeInterval?
                     if let turnStarted = sessionState.turnStarted {
                         if endDate >= turnStarted {
@@ -401,20 +422,10 @@ enum AgentLogParser {
                     sessionState.turnOpen = false
                     sessionState.turnStarted = nil
                     sessionState.activeUserMessageID = ""
-                    entries.append(.turnEnded(endDate, completed: !hasError && finish != "abort", duration: duration))
+                    entries.append(.turnEnded(endDate, completed: !hasError, duration: duration))
                 }
-                if !id.isEmpty {
-                    if sessionState.completedAssistantMessageIDs.count > 100 {
-                        sessionState.completedAssistantMessageIDs.removeFirst()
-                    }
-                    sessionState.completedAssistantMessageIDs.insert(id)
-                }
-                if !parentID.isEmpty {
-                    if sessionState.completedUserMessageIDs.count > 100 {
-                        sessionState.completedUserMessageIDs.removeFirst()
-                    }
-                    sessionState.completedUserMessageIDs.insert(parentID)
-                }
+                if !id.isEmpty { remember(id, in: &sessionState.completedAssistantMessageIDs) }
+                if !parentID.isEmpty { remember(parentID, in: &sessionState.completedUserMessageIDs) }
             } else if !isAlreadyCompleted && matchesActivePrompt {
                 entries.append(.turnActive(date))
             }
@@ -427,6 +438,12 @@ enum AgentLogParser {
         default:
             return []
         }
+    }
+
+    /// Keeps a bounded number of message ids a session has settled.
+    private static func remember(_ id: String, in ids: inout Set<String>) {
+        if ids.count > 100 { ids.removeFirst() }
+        ids.insert(id)
     }
 
     /// Input counts include what came from the cache.
