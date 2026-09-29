@@ -125,18 +125,30 @@ final class AgentUsageStore {
             let old = records[position]
             let merged = old.tokens.merged(with: record.tokens)
             if merged == old.tokens {
-                if record.provider == .opencode, let reported = record.cost, reported != old.cost {
-                    summary.recordChanged(at: position, previous: old)
-                    let extra = reported - (old.cost ?? 0)
-                    records[position].cost = reported
+                if record.provider == .opencode {
+                    let newCost: Double?
+                    let isReported: Bool
                     if record.reportedCost {
-                        records[position].reportedCost = true
+                        newCost = record.cost
+                        isReported = true
+                    } else if old.reportedCost {
+                        newCost = old.cost
+                        isReported = true
+                    } else {
+                        newCost = record.cost ?? old.cost
+                        isReported = false
                     }
-                    if let file, var turn = turns[file] ?? waiting[file],
-                       record.date >= turn.started.addingTimeInterval(-1) {
-                        waiting[file] = nil
-                        turn.cost += extra
-                        turns[file] = turn
+                    if newCost != old.cost || isReported != old.reportedCost {
+                        summary.recordChanged(at: position, previous: old)
+                        let extra = (newCost ?? 0) - (old.cost ?? 0)
+                        records[position].cost = newCost
+                        records[position].reportedCost = isReported
+                        if let file, var turn = turns[file] ?? waiting[file],
+                           record.date >= turn.started.addingTimeInterval(-1) {
+                            waiting[file] = nil
+                            turn.cost += extra
+                            turns[file] = turn
+                        }
                     }
                 }
                 return

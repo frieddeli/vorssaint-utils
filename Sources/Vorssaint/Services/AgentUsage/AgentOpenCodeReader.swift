@@ -93,7 +93,7 @@ enum AgentOpenCodeReader {
 
             let isUser = dataStr.contains("\"role\":\"user\"") || dataStr.contains("\"role\": \"user\"")
             let rowTimestamp = isUser ? created : max(created, updated)
-            let revKey = "\(id):\(isUser ? created : updated)"
+            let revKey = isUser ? "\(id):\(created)" : "\(id):\(updated):\(dataStr.hashValue)"
 
             if rowTimestamp < since || (rowTimestamp == since && cursor.boundaryRevisions.contains(revKey)) {
                 continue

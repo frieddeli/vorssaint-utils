@@ -804,16 +804,15 @@ enum NotchAgentTests {
         suite.expect(linesRead.count == 1 && cursor.offset == 1_790_088_000_000,
                      "boundary initial read returns m1 and sets offset")
 
-        // Insert two messages m2 and m3 committed in the SAME millisecond timestamp
+        // Commit 1: Insert assistant message m2 committed in same-millisecond timestamp
         var db2: OpaquePointer?
         guard sqlite3_open(dbPath, &db2) == SQLITE_OK, let db2 else {
-            suite.expect(false, "re-opening boundary database")
+            suite.expect(false, "re-opening boundary database for commit 1")
             return
         }
         let sameMs: Int64 = 1_790_088_005_000
         sqlite3_exec(db2, """
         INSERT INTO message VALUES ('m2', 's_bd', \(sameMs), \(sameMs), '{"role":"assistant","tokens":{"input":10,"output":5}}');
-        INSERT INTO message VALUES ('m3', 's_bd', \(sameMs), \(sameMs), '{"role":"assistant","tokens":{"input":20,"output":10},"finish":"stop"}');
         """, nil, nil, nil)
         sqlite3_close(db2)
 
@@ -821,11 +820,32 @@ enum NotchAgentTests {
         AgentOpenCodeReader.readAppended(cursor) { data in
             linesRead.append(String(decoding: data, as: UTF8.self))
         }
+        suite.expect(linesRead.count == 1 && linesRead.first?.contains(#""id":"m2"#) == true
+                        && cursor.offset == UInt64(sameMs),
+                     "assistant message m2 is read in commit 1 and sets cursor offset to same-millisecond timestamp")
+
+        // Commit 2: Within the SAME millisecond timestamp (time_created & time_updated unchanged),
+        // update the same assistant message m2 with new tokens and final finish status, and insert m3
+        var db3: OpaquePointer?
+        guard sqlite3_open(dbPath, &db3) == SQLITE_OK, let db3 else {
+            suite.expect(false, "re-opening boundary database for commit 2")
+            return
+        }
+        sqlite3_exec(db3, """
+        UPDATE message SET data = '{"role":"assistant","tokens":{"input":30,"output":15},"finish":"stop"}' WHERE id = 'm2';
+        INSERT INTO message VALUES ('m3', 's_bd', \(sameMs), \(sameMs), '{"role":"assistant","tokens":{"input":20,"output":10},"finish":"stop"}');
+        """, nil, nil, nil)
+        sqlite3_close(db3)
+
+        linesRead.removeAll()
+        AgentOpenCodeReader.readAppended(cursor) { data in
+            linesRead.append(String(decoding: data, as: UTF8.self))
+        }
         suite.expect(linesRead.count == 2
-                        && linesRead.contains { $0.contains(#""id":"m2"#) }
+                        && linesRead.contains { $0.contains(#""id":"m2"#) && $0.contains(#""finish":"stop"#) && $0.contains(#""input":30"#) }
                         && linesRead.contains { $0.contains(#""id":"m3"#) }
                         && cursor.offset == UInt64(sameMs),
-                     "same-millisecond messages m2 and m3 are both read without skipping")
+                     "updated assistant payload for m2 within same millisecond is read and new message m3 is also read")
 
         // Third read with no new messages does not duplicate m2 or m3
         linesRead.removeAll()
@@ -971,6 +991,45 @@ enum NotchAgentTests {
         suite.expectClose(unpAfter?.cost ?? -1, 0.008,
                           "store.reprice() calculates cost for previously unpriced model that gained a price",
                           tol: 0.000001)
+
+        // a) Record with reported cost updated with list-derived cost estimate -> reported cost and source are preserved
+        let repEstimateUpdate = AgentLogEntry.usage(
+            key: "opencode:s_rp:m_rep",
+            record: AgentUsageRecord(provider: .opencode, date: now, model: "stealth/ox-alpha", project: "p",
+                                     session: "s_rp", tokens: AgentTokens(input: 1000, output: 200),
+                                     cost: 0.015, savings: 0, reportedCost: false),
+            billable: AgentBillable(tokens: AgentTokens(input: 1000, output: 200))
+        )
+        store.apply([repEstimateUpdate], file: "db#s_rp", provider: .opencode, tracksTurns: false, modified: now, now: now)
+        let repAfterEstimate = store.records.first { $0.session == "s_rp" && $0.model == "stealth/ox-alpha" }
+        suite.expect(repAfterEstimate?.cost == 0.005 && repAfterEstimate?.reportedCost == true,
+                     "record with reported cost updated with list-derived cost estimate preserves reported cost and source")
+
+        // b) Record with list-derived cost updated with same tokens and same cost but source changed to reported
+        let listReportedUpdate = AgentLogEntry.usage(
+            key: "opencode:s_rp:m_list",
+            record: AgentUsageRecord(provider: .opencode, date: now, model: "claude-3-5-sonnet", project: "p",
+                                     session: "s_rp", tokens: AgentTokens(input: 1000, output: 200),
+                                     cost: 0.012, savings: 0, reportedCost: true),
+            billable: AgentBillable(tokens: AgentTokens(input: 1000, output: 200))
+        )
+        store.apply([listReportedUpdate], file: "db#s_rp", provider: .opencode, tracksTurns: false, modified: now, now: now)
+        let listAfterReported = store.records.first { $0.session == "s_rp" && $0.model == "claude-3-5-sonnet" }
+        suite.expect(listAfterReported?.cost == 0.012 && listAfterReported?.reportedCost == true,
+                     "record with list-derived cost updated with same tokens and same cost but source changed to reported updates reportedCost to true")
+
+        // c) Record with reported cost updated with new reported cost -> updates cost and keeps reportedCost: true
+        let repNewCostUpdate = AgentLogEntry.usage(
+            key: "opencode:s_rp:m_rep",
+            record: AgentUsageRecord(provider: .opencode, date: now, model: "stealth/ox-alpha", project: "p",
+                                     session: "s_rp", tokens: AgentTokens(input: 1000, output: 200),
+                                     cost: 0.008, savings: 0, reportedCost: true),
+            billable: AgentBillable(tokens: AgentTokens(input: 1000, output: 200))
+        )
+        store.apply([repNewCostUpdate], file: "db#s_rp", provider: .opencode, tracksTurns: false, modified: now, now: now)
+        let repAfterNewCost = store.records.first { $0.session == "s_rp" && $0.model == "stealth/ox-alpha" }
+        suite.expect(repAfterNewCost?.cost == 0.008 && repAfterNewCost?.reportedCost == true,
+                     "record with reported cost updated with new reported cost updates cost and keeps reportedCost true")
     }
 
     private static func openCodeSubagents(_ suite: TestSuite, now: Date) {
