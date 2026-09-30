@@ -513,6 +513,13 @@ enum NotchAgentTests {
         let chunkPath = "/tmp/agent-data/conv-uuid-1234/.system_generated/logs/chunks/0.jsonl"
         suite.expect(AgentLogReader.isLog(transcriptPath, in: symlinkedRoot), "transcript under symlinked root is accepted as log")
         suite.expect(!AgentLogReader.isLog(chunkPath, in: symlinkedRoot), "chunk logs under symlinked root are rejected")
+        for stray in ["/tmp/agent-data/transcript.jsonl",
+                      "/tmp/agent-data/conv-uuid-1234/transcript.jsonl",
+                      "/tmp/agent-data/conv-uuid-1234/other/logs/transcript.jsonl",
+                      "/tmp/agent-data/conv-uuid-1234/.system_generated/logs/chunks/transcript.jsonl",
+                      "/tmp/agent-data/conv-uuid-1234/.system_generated/logs/notes.jsonl"] {
+            suite.expect(!AgentLogReader.isLog(stray, in: symlinkedRoot), "only a conversation's own transcript is read: \(stray)")
+        }
         suite.expect(AgentLogCursor.session(of: transcriptPath, provider: .antigravity, roots: [symlinkedRoot]) == "conv-uuid-1234",
                      "session ID extracted correctly relative to canonical root")
 

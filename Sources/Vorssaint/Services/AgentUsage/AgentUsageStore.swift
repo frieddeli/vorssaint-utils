@@ -379,17 +379,10 @@ enum AgentLogReader {
         let relative = String(path.dropFirst(root.url.path.count + 1))
         guard relative.hasSuffix(".jsonl") else { return false }
         if root.provider == .antigravity {
-            return (relative as NSString).lastPathComponent == "transcript.jsonl"
-                && !relative.contains("/chunks/")
-        }
-        return true
-    }
-
-    static func isLog(_ path: String, provider: AgentProvider = .claude) -> Bool {
-        guard path.hasSuffix(".jsonl") else { return false }
-        if provider == .antigravity {
-            return (path as NSString).lastPathComponent == "transcript.jsonl"
-                && !path.contains("/chunks/")
+            // Only <conversation>/.system_generated/logs/transcript.jsonl.
+            let parts = relative.split(separator: "/", omittingEmptySubsequences: false)
+            return parts.count == 4 && !parts[0].isEmpty
+                && parts[1...] == [".system_generated", "logs", "transcript.jsonl"]
         }
         return true
     }
