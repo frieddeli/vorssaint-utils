@@ -379,7 +379,7 @@ private extension AgentProvider {
     var appIdentifiers: [String] {
         switch self {
         case .claude: return [AgentClaudeAppUsage.bundleIdentifier]
-        case .codex: return ["com.openai.codex", "com.openai.chat"]
+        case .codex: return AgentCodexServer.appIdentifiers
         case .antigravity: return ["com.google.antigravity", "com.google.antigravity.ide"]
         }
     }
