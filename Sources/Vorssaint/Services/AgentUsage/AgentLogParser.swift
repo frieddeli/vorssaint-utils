@@ -15,6 +15,9 @@ enum AgentLogEntry: Equatable {
     case turnBegan(Date)
     /// Work continues; nil when the line was not worth decoding for its time.
     case turnActive(Date?)
+    /// A step ended expecting the agent to go on; unless work follows soon,
+    /// the agent stopped there and its turn is over.
+    case turnSettled(Date)
     case turnEnded(Date?, completed: Bool, duration: TimeInterval?)
     case reset(Date)
 }
@@ -44,6 +47,14 @@ struct OpenCodeSessionState: Equatable {
     var turnOpen = false
     var turnStarted: Date?
     var activeUserMessageID = ""
+    /// The newest moment the session's rows tell of.
+    var lastActivity: Date?
+    /// When a step ended expecting the loop to go on, until a row follows.
+    var settledAt: Date?
+    /// The reply being written, until it completes.
+    var writingReplyID = ""
+    /// When the prompt the session answers now was written.
+    var activePromptDate: Date?
     var seenUserMessageIDs: Set<String> = []
     var completedAssistantMessageIDs: Set<String> = []
     var completedUserMessageIDs: Set<String> = []
@@ -294,6 +305,11 @@ enum AgentLogParser {
 
     // MARK: OpenCode
 
+    /// OpenCode starts the next step the moment a step's tools return, so
+    /// a turn that goes this long without one after a step ended has stopped,
+    /// as when a permission was rejected or a question dismissed.
+    static let openCodeSettle: TimeInterval = 30
+
     static func parseOpenCode(_ line: Data, state: inout AgentLogState, now: Date) -> [AgentLogEntry] {
         guard contains(line, #""role":""#) || contains(line, #""type":"reset""#) else { return [] }
         guard let json = object(line) else { return [] }
@@ -318,6 +334,8 @@ enum AgentLogParser {
 
         let timeCreated = (json["time"] as? [String: Any])?["created"] ?? json["time_created"]
         let date = seconds(timeCreated) ?? now
+        let lastActivity = sessionState.lastActivity
+        sessionState.lastActivity = max(lastActivity ?? date, date)
 
         switch role {
         case "user":
@@ -332,9 +350,26 @@ enum AgentLogParser {
             // summary after a command's subtask. A prompt sent while it works
             // joins the running loop too, so inside a turn each is activity.
             var entries: [AgentLogEntry] = []
-            if sessionState.turnOpen {
+            // A prompt that arrives after the session went quiet is a task of
+            // its own: the one before stopped without a word, as when a tool
+            // call was rejected, and nothing finished. While a reply is still
+            // being written, as through a long command, the prompt joins it.
+            let quiet: Bool
+            if let settled = sessionState.settledAt {
+                quiet = date.timeIntervalSince(settled) >= openCodeSettle
+            } else if sessionState.writingReplyID.isEmpty, let lastActivity {
+                quiet = date.timeIntervalSince(lastActivity) >= NotchAgentSupport.idleTurn
+            } else {
+                quiet = false
+            }
+            sessionState.settledAt = nil
+            sessionState.activePromptDate = date
+            if sessionState.turnOpen && !quiet {
                 entries.append(.turnActive(date))
             } else {
+                if sessionState.turnOpen {
+                    entries.append(.turnEnded(lastActivity, completed: false, duration: nil))
+                }
                 sessionState.turnOpen = true
                 sessionState.turnStarted = date
                 entries.append(.turnBegan(date))
@@ -373,15 +408,19 @@ enum AgentLogParser {
                                      output: output + reasoning, reasoning: reasoning)
             let billable = AgentBillable(tokens: tokens)
             let priced = AgentPricing.cost(billable, model: sessionState.model)
-            let reportedCostVal = (json["cost"] as? NSNumber)?.doubleValue ?? 0
+            let recordedCost = (json["cost"] as? NSNumber)?.doubleValue
+            let reportedCostVal = recordedCost ?? 0
+            // A model the list does not know costs what OpenCode recorded.
+            // Local and free models record zero, which stays an estimate so
+            // a price the list learns later still applies.
             let cost: Double?
             let isReported: Bool
             if let calculated = priced.cost {
                 cost = calculated
                 isReported = false
-            } else if reportedCostVal > 0 {
-                cost = reportedCostVal
-                isReported = true
+            } else if let recordedCost {
+                cost = recordedCost
+                isReported = recordedCost > 0
             } else {
                 cost = nil
                 isReported = false
@@ -392,7 +431,31 @@ enum AgentLogParser {
                 || (!parentID.isEmpty && sessionState.completedUserMessageIDs.contains(parentID))
             let matchesActivePrompt = parentID.isEmpty || parentID == sessionState.activeUserMessageID
 
+            let timeCompleted = (json["time"] as? [String: Any])?["completed"]
+            let completed = seconds(timeCompleted)
+            let hasError = json["error"].map { !($0 is NSNull) } ?? false
+            let finish = json["finish"] as? String
+            if let completed { sessionState.lastActivity = max(sessionState.lastActivity ?? completed, completed) }
+            // A step that starts after the last one settled is the loop going on.
+            if let settled = sessionState.settledAt, date >= settled { sessionState.settledAt = nil }
+
             var entries: [AgentLogEntry] = []
+            // OpenCode completes each reply before it answers a prompt sent
+            // meanwhile. A reply to a newer prompt while an older one never
+            // completed means OpenCode stopped in the middle of it, as when
+            // it was killed, and the newer prompt started a task of its own.
+            if !id.isEmpty, !sessionState.writingReplyID.isEmpty, sessionState.writingReplyID != id,
+               sessionState.turnOpen, !parentID.isEmpty, parentID == sessionState.activeUserMessageID,
+               let prompt = sessionState.activePromptDate, let started = sessionState.turnStarted, prompt > started {
+                entries.append(.turnEnded(nil, completed: false, duration: nil))
+                entries.append(.turnBegan(prompt))
+                sessionState.turnStarted = prompt
+            }
+            if completed == nil && finish == nil && !hasError && !id.isEmpty {
+                sessionState.writingReplyID = id
+            } else if sessionState.writingReplyID == id {
+                sessionState.writingReplyID = ""
+            }
             if !isAlreadyCompleted && matchesActivePrompt && !sessionState.turnOpen {
                 sessionState.turnOpen = true
                 sessionState.turnStarted = date
@@ -416,9 +479,6 @@ enum AgentLogParser {
             // summary of a compaction it started on its own. Any other finish
             // stops it, as does an error or a reply that completes without a
             // finish, like a shell command's.
-            let finish = json["finish"] as? String
-            let hasError = json["error"].map { !($0 is NSNull) } ?? false
-            let timeCompleted = (json["time"] as? [String: Any])?["completed"]
             let ends: Bool
             if hasError {
                 ends = true
@@ -426,12 +486,12 @@ enum AgentLogParser {
                 ends = !["tool-calls", "unknown"].contains(finish)
                     && json["tool_calls"] as? Bool != true && json["auto_compaction"] as? Bool != true
             } else {
-                ends = seconds(timeCompleted) != nil
+                ends = completed != nil
             }
 
             if ends {
                 if !isAlreadyCompleted && matchesActivePrompt && sessionState.turnOpen {
-                    let endDate = seconds(timeCompleted) ?? seconds(json["time_updated"]) ?? date
+                    let endDate = completed ?? seconds(json["time_updated"]) ?? date
                     var duration: TimeInterval?
                     if let turnStarted = sessionState.turnStarted {
                         if endDate >= turnStarted {
@@ -443,12 +503,20 @@ enum AgentLogParser {
                     sessionState.turnOpen = false
                     sessionState.turnStarted = nil
                     sessionState.activeUserMessageID = ""
+                    sessionState.settledAt = nil
                     entries.append(.turnEnded(endDate, completed: !hasError, duration: duration))
                 }
                 if !id.isEmpty { remember(id, in: &sessionState.completedAssistantMessageIDs) }
                 if !parentID.isEmpty { remember(parentID, in: &sessionState.completedUserMessageIDs) }
             } else if !isAlreadyCompleted && matchesActivePrompt {
-                entries.append(.turnActive(date))
+                // A step that completed hands over to the next one at once,
+                // unless the loop stopped there.
+                if let completed, sessionState.turnOpen {
+                    sessionState.settledAt = completed
+                    entries.append(.turnSettled(completed))
+                } else {
+                    entries.append(.turnActive(date))
+                }
             }
             state.openCodeSessions[sessionID] = sessionState
             state.project = sessionState.project

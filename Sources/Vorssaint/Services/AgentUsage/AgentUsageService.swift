@@ -246,8 +246,9 @@ final class AgentUsageService: ObservableObject {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let read = self.pollOpenLogs(within: Self.pollWindow)
+            let stopped = self.store.closeSettledTurns(now: Date())
             // After the logs, so a turn its last lines ended ends as usual.
-            guard self.closeEndedTurns(self.watchedRoots) || read else { return }
+            guard self.closeEndedTurns(self.watchedRoots) || read || stopped else { return }
             self.checkLimits()
             self.schedulePublish()
         }
@@ -263,10 +264,14 @@ final class AgentUsageService: ObservableObject {
         let now = Date()
         // A turn gone quiet, as while it waits for an approval, is noticed
         // as soon as its work resumes.
-        let working = Set(store.turns.keys).union(store.waiting.keys)
+        var working = Set(store.turns.keys).union(store.waiting.keys)
+        // An OpenCode turn is kept by database and session.
+        for key in working {
+            if let mark = key.firstIndex(of: "#") { working.insert(String(key[..<mark])) }
+        }
         var changed = false
         for (path, cursor) in cursors
-        where working.contains(path) || working.contains(where: { $0.hasPrefix(path + "#") }) || now.timeIntervalSince(cursor.modified) < window {
+        where working.contains(path) || now.timeIntervalSince(cursor.modified) < window {
             if cursor.provider == .opencode {
                 // A database changes in place: its write-ahead log grows instead.
                 if let modified = AgentOpenCodeReader.modified(path), modified <= cursor.modified { continue }

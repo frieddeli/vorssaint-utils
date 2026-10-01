@@ -470,7 +470,7 @@ enum NotchAgentTests {
 
         // 2. Assistant message in progress (tool-calls) with reported cost and exact tokens
         let assistantActive = line("""
-        {"id":"msg_1","session_id":"s_oc_1","time_created":1790088005,"directory":"/Users/me/code/backend","role":"assistant","model_id":"stealth/ox-alpha","provider_id":"openrouter","cost":0.0042,"tokens":{"total":1250,"input":1000,"output":200,"reasoning":50,"cache":{"read":50,"write":0}},"finish":"tool-calls"}
+        {"id":"msg_1","session_id":"s_oc_1","time_created":1790088005,"directory":"/Users/me/code/backend","role":"assistant","model_id":"stealth/ox-alpha","provider_id":"relay","cost":0.0042,"tokens":{"total":1250,"input":1000,"output":200,"reasoning":50,"cache":{"read":50,"write":0}},"finish":"tool-calls"}
         """)
         let activeEntries = AgentLogParser.parseOpenCode(assistantActive, state: &state, now: now)
         guard case .usage(let key, let record, _)? = activeEntries.first(where: {
@@ -492,7 +492,7 @@ enum NotchAgentTests {
 
         // 3. Assistant message completed (finish: stop)
         let assistantStop = line("""
-        {"id":"msg_2","session_id":"s_oc_1","time_created":1790088020,"directory":"/Users/me/code/backend","role":"assistant","model_id":"stealth/ox-alpha","provider_id":"openrouter","cost":0.0015,"tokens":{"total":500,"input":400,"output":100,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"stop"}
+        {"id":"msg_2","session_id":"s_oc_1","time_created":1790088020,"directory":"/Users/me/code/backend","role":"assistant","model_id":"stealth/ox-alpha","provider_id":"relay","cost":0.0015,"tokens":{"total":500,"input":400,"output":100,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"stop"}
         """)
         let stopEntries = AgentLogParser.parseOpenCode(assistantStop, state: &state, now: now)
         let stopDate = Date(timeIntervalSince1970: 1_790_088_020)
@@ -522,7 +522,8 @@ enum NotchAgentTests {
         """)
         let unpricedEntries = AgentLogParser.parseOpenCode(unpricedMsg, state: &fallbackState, now: now)
         if case .usage(_, let rec, _)? = unpricedEntries.first(where: { if case .usage = $0 { return true }; return false }) {
-            suite.expect(rec.cost == nil, "a zero cost for an unknown model is treated as unpriced rather than free")
+            suite.expect(rec.cost == 0 && !rec.reportedCost,
+                         "a zero OpenCode recorded for a model the list does not know is that reply's cost")
         } else {
             suite.expect(false, "an unpriced response still records usage")
         }
@@ -539,12 +540,10 @@ enum NotchAgentTests {
         }
 
         // 6. Display names
-        suite.expect(AgentPricing.displayName("stealth/ox-alpha") == "Ox Alpha"
-                        && AgentPricing.displayName("deepseek/deepseek-chat") == "Deepseek Chat"
-                        && AgentPricing.displayName("deepseek-ai/deepseek-v3") == "Deepseek V3"
-                        && AgentPricing.displayName("openrouter/anthropic/claude-3-5-sonnet") == "Sonnet 3.5"
-                        && AgentPricing.displayName("google/gemini-2.5-pro") == "Gemini 2.5 Pro",
-                     "display names format provider models cleanly")
+        suite.expect(AgentPricing.displayName("relay/vendor/claude-opus-5-5") == "Opus 5.5"
+                        && AgentPricing.displayName("relay/claude-opus-5.5") == "Opus 5.5"
+                        && AgentPricing.displayName("stealth/ox-alpha") == "ox-alpha",
+                     "a router's prefixes are dropped and a dotted version reads like a dashed one")
 
         // 7. SQLite reader with temporary database
         let tmpDir = FileManager.default.temporaryDirectory.appending(path: "vorss-opencode-\(UUID().uuidString)")
@@ -573,8 +572,8 @@ enum NotchAgentTests {
         AgentOpenCodeReader.readAppended(cursor) { data in
             linesRead.append(String(decoding: data, as: UTF8.self))
         }
-        suite.expect(linesRead.count == 2 && cursor.offset == 1_790_088_005_000,
-                     "OpenCode reader retrieves messages in order and advances offset to latest timestamp")
+        suite.expect(linesRead.count == 2 && cursor.offset == 2,
+                     "OpenCode reader retrieves messages in order and moves past the last row read")
 
         // Incremental check: add message m3
         var db2: OpaquePointer?
@@ -591,9 +590,8 @@ enum NotchAgentTests {
         AgentOpenCodeReader.readAppended(cursor) { data in
             linesRead.append(String(decoding: data, as: UTF8.self))
         }
-        suite.expect(linesRead.count == 1 && linesRead.first?.contains("m3") == true
-                        && cursor.offset == 1_790_088_010_000,
-                     "incremental read only returns messages created after previous offset")
+        suite.expect(linesRead.count == 1 && linesRead.first?.contains("m3") == true && cursor.offset == 3,
+                     "incremental read only returns messages saved after the previous read")
 
         // User message metadata updates (e.g. summary diffs) are ignored on incremental reads
         var db3: OpaquePointer?
@@ -710,13 +708,14 @@ enum NotchAgentTests {
                      "aborted turn ends with completed: false")
         suite.expect(abortState.openCodeSessions["s_ab"]?.turnOpen == false, "turn is closed after abort")
 
-        // 14. Model name parsing & formatting
-        suite.expect(AgentPricing.displayName("nvidia/nemotron-3-super-120b-a12b") == "Nemotron 3 Super 120B A12B"
-                        && AgentPricing.displayName("muse-spark-1.3-contributor-free") == "Muse Spark 1.3 Contributor Free"
-                        && AgentPricing.displayName("moonshotai/kimi-k3") == "Kimi K3"
-                        && AgentPricing.displayName("anthropic/claude-3.5-sonnet") == "Sonnet 3.5"
-                        && AgentPricing.displayName("anthropic/claude-3.7-sonnet:thinking") == "Sonnet 3.7",
-                     "OpenCode models read without provider prefix, tags, and with proper casing")
+        // 14. Model names
+        suite.expect(AgentPricing.displayName("relay/claude-sonnet-5.1:deep") == "Sonnet 5.1",
+                     "a router's tag after a Claude model names a mode of the same model")
+        suite.expect(AgentPricing.displayName("q7") == "q7" && AgentPricing.displayName("q7-mini") == "q7-mini",
+                     "names that start with neither claude nor gpt show as written")
+        suite.expect(AgentPricing.displayName("gpt-astra:20b") == "GPT Astra:20B"
+                        && AgentPricing.displayName("gpt-astra:120b") == "GPT Astra:120B",
+                     "a size after a colon stays in the name, so each build keeps a row of its own")
 
         // 15. Repricing keeps OpenCode's recorded cost
         let beforeCost = store.records.first { $0.provider == .opencode }?.cost
@@ -727,10 +726,10 @@ enum NotchAgentTests {
 
         // 16. Fallback model string representation in json["model"]
         var modelFallbackState = AgentLogState()
-        let stringModelMsg = line(#"{"id":"ast_str_m","session_id":"s_sm","time_created":1790089400,"directory":"/p","role":"assistant","model":"anthropic/claude-3.5-sonnet","tokens":{"input":10,"output":5}}"#)
+        let stringModelMsg = line(#"{"id":"ast_str_m","session_id":"s_sm","time_created":1790089400,"directory":"/p","role":"assistant","model":"relay/claude-opus-5.5","tokens":{"input":10,"output":5}}"#)
         let stringModelEntries = AgentLogParser.parseOpenCode(stringModelMsg, state: &modelFallbackState, now: now)
         if case .usage(_, let rec, _)? = stringModelEntries.first(where: { if case .usage = $0 { return true }; return false }) {
-            suite.expect(rec.model == "anthropic/claude-3.5-sonnet", "json['model'] as String is picked up as model")
+            suite.expect(rec.model == "relay/claude-opus-5.5", "json['model'] as String is picked up as model")
         } else {
             suite.expect(false, "string model message yields usage")
         }
@@ -751,7 +750,8 @@ enum NotchAgentTests {
         suite.expect(appliedEvents == [.finished(provider: .opencode, duration: 25, cost: 0.01, tokens: 500, project: "p")],
                      "store emits .finished event when OpenCode assistant turn stops")
 
-        // PR #2215 maintainer review comment test suites
+        // Reading the database, cost sources and repricing, subagents, and
+        // the turns OpenCode's own rows keep going, end or leave behind.
         openCodeReasoningTokens(suite, now: now)
         openCodeMillisecondDedup(suite)
         openCodeLifecycleIdempotence(suite, now: now)
@@ -765,6 +765,10 @@ enum NotchAgentTests {
         openCodeFinishes(suite, now: now)
         openCodeAgentPrompts(suite, now: now)
         openCodeParts(suite, now: now)
+        openCodeLongHistory(suite)
+        openCodeRevert(suite)
+        openCodeOpenReplies(suite)
+        openCodeStoppedLoops(suite, now: now)
     }
 
     private static func openCodeReasoningTokens(_ suite: TestSuite, now: Date) {
@@ -813,8 +817,7 @@ enum NotchAgentTests {
         AgentOpenCodeReader.readAppended(cursor) { data in
             linesRead.append(String(decoding: data, as: UTF8.self))
         }
-        suite.expect(linesRead.count == 1 && cursor.offset == 1_790_088_000_000,
-                     "boundary initial read returns m1 and sets offset")
+        suite.expect(linesRead.count == 1 && cursor.offset == 1, "an initial read returns m1")
 
         // Commit 1: Insert assistant message m2 committed in same-millisecond timestamp
         var db2: OpaquePointer?
@@ -832,9 +835,8 @@ enum NotchAgentTests {
         AgentOpenCodeReader.readAppended(cursor) { data in
             linesRead.append(String(decoding: data, as: UTF8.self))
         }
-        suite.expect(linesRead.count == 1 && linesRead.first?.contains(#""id":"m2"#) == true
-                        && cursor.offset == UInt64(sameMs),
-                     "assistant message m2 is read in commit 1 and sets cursor offset to same-millisecond timestamp")
+        suite.expect(linesRead.count == 1 && linesRead.first?.contains(#""id":"m2"#) == true && cursor.offset == 2,
+                     "a reply still being written is read when saved")
 
         // Commit 2: Within the SAME millisecond timestamp (time_created & time_updated unchanged),
         // update the same assistant message m2 with new tokens and final finish status, and insert m3
@@ -856,8 +858,8 @@ enum NotchAgentTests {
         suite.expect(linesRead.count == 2
                         && linesRead.contains { $0.contains(#""id":"m2"#) && $0.contains(#""finish":"stop"#) && $0.contains(#""input":30"#) }
                         && linesRead.contains { $0.contains(#""id":"m3"#) }
-                        && cursor.offset == UInt64(sameMs),
-                     "updated assistant payload for m2 within same millisecond is read and new message m3 is also read")
+                        && cursor.offset == 3,
+                     "a reply updated within the same millisecond is read again, and a new message is read")
 
         // Third read with no new messages does not duplicate m2 or m3
         linesRead.removeAll()
@@ -971,8 +973,8 @@ enum NotchAgentTests {
                      "reported record has reportedCost: true and preserved exact cost")
         suite.expect(listRec?.reportedCost == false && abs((listRec?.cost ?? 0) - 0.006) < 0.000001,
                      "list-derived record calculates cost from price list (input 3, output 15 -> 0.006)")
-        suite.expect(unpRec?.reportedCost == false && unpRec?.cost == nil,
-                     "unlisted model with cost 0 starts unpriced")
+        suite.expect(unpRec?.reportedCost == false && unpRec?.cost == 0,
+                     "an unlisted model OpenCode recorded at zero starts at zero")
 
         // Now install an updated price list with doubled prices for claude-3-5-sonnet and a new price for custom-nova-1
         let prevList = AgentPricing.list
@@ -1003,6 +1005,12 @@ enum NotchAgentTests {
         suite.expectClose(unpAfter?.cost ?? -1, 0.008,
                           "store.reprice() calculates cost for previously unpriced model that gained a price",
                           tol: 0.000001)
+        let local = AgentLogParser.parseOpenCode(line(#"{"id":"m_loc","session_id":"s_rp","time_created":1790089830,"role":"assistant","model_id":"custom-ember-1","cost":0,"tokens":{"input":10,"output":2}}"#),
+                                                 state: &state, now: now)
+        store.apply(local, file: "db#s_rp", provider: .opencode, tracksTurns: false, modified: now, now: now)
+        store.reprice()
+        suite.expect(store.records.first { $0.model == "custom-ember-1" }?.cost == 0,
+                     "a zero recorded for a model the list still does not know stays its cost")
 
         // a) Record with reported cost updated with list-derived cost estimate -> reported cost and source are preserved
         let repEstimateUpdate = AgentLogEntry.usage(
@@ -1250,14 +1258,14 @@ enum NotchAgentTests {
 
         let cursor = AgentLogCursor(path: path, provider: .opencode)
         let first = openCodeRead(cursor, since: Date(timeIntervalSince1970: 1_789_000_000))
-        suite.expect(first.map { $0["id"] as? String } == ["m_new"] && cursor.offset == 1_790_088_000_000,
+        suite.expect(first.map { $0["id"] as? String } == ["m_new"] && cursor.offset == 2,
                      "a first read starts at the horizon instead of the database's first message")
 
         openCodeExec(path, """
         INSERT INTO message VALUES ('m_b1', 's_b', 1790088010000, 1790088010000, '{"role":"assistant","parentID":"m_new","tokens":{"input":10,"output":5}}');
         """)
         let second = openCodeRead(cursor, since: Date(timeIntervalSince1970: 1_789_000_000))
-        suite.expect(second.map { $0["id"] as? String } == ["m_b1"] && cursor.offset == 1_790_088_010_000,
+        suite.expect(second.map { $0["id"] as? String } == ["m_b1"] && cursor.offset == 3,
                      "a newer row from another session moves the cursor on")
 
         // Stamped long before it is saved, as when its attachments take a while.
@@ -1481,6 +1489,159 @@ enum NotchAgentTests {
                      "a finished reply still holding a tool call is told apart from provider and abandoned calls")
         suite.expect(flags["s_auto"]?.1 == true && flags["s_hand"]?.1 == false,
                      "a summary of an automatic compaction is told apart from one asked for by hand")
+    }
+
+    // MARK: OpenCode history
+
+    private static func openCodeLongHistory(_ suite: TestSuite) {
+        guard let (folder, path) = openCodeDatabase("""
+        INSERT INTO session VALUES ('s_h', '/code/app', NULL, 1780000000000, 1790088000000);
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+        INSERT INTO message SELECT 'old' || i, 's_h', 1780000000000 + i * 1000, 1780000000000 + i * 1000,
+            '{"role":"assistant","tokens":{"input":1},"finish":"stop","time":{"completed":1}}' FROM n;
+        INSERT INTO message VALUES ('u1', 's_h', 1790088000000, 1790088000000, '{"role":"user"}');
+        INSERT INTO message VALUES ('a1', 's_h', 1790088001000, 1790088002000, '{"role":"assistant","parentID":"u1","tokens":{"input":5},"finish":"stop","time":{"completed":1790088002000}}');
+        """) else {
+            suite.expect(false, "history database opens")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let horizon = Date(timeIntervalSince1970: 1_789_000_000)
+        let cursor = AgentLogCursor(path: path, provider: .opencode)
+        suite.expect(openCodeRead(cursor, since: horizon).map { $0["id"] as? String } == ["u1", "a1"]
+                        && cursor.offset == 5002,
+                     "a first read over a long history starts at the horizon")
+        openCodeExec(path, """
+        UPDATE message SET time_updated = 1790088003000, data = '{"role":"user","summary":{"diffs":[]}}' WHERE id = 'u1';
+        UPDATE message SET time_updated = 1790088003000 WHERE id = 'old1';
+        INSERT INTO message VALUES ('u2', 's_h', 1790088010000, 1790088010000, '{"role":"user"}');
+        """)
+        suite.expect(openCodeRead(cursor, since: horizon).map { $0["id"] as? String } == ["u2"],
+                     "a later read hands over only the new row, not a prompt saved again or an old row touched")
+        suite.expect(openCodeRead(cursor, since: horizon).isEmpty, "a read with nothing new hands over nothing")
+    }
+
+    private static func openCodeRevert(_ suite: TestSuite) {
+        guard let (folder, path) = openCodeDatabase("""
+        INSERT INTO session VALUES ('s_r', '/code/app', NULL, 1790088000000, 1790088000000);
+        INSERT INTO message VALUES ('u1', 's_r', 1790088000000, 1790088000000, '{"role":"user"}');
+        INSERT INTO message VALUES ('a1', 's_r', 1790088001000, 1790088002000, '{"role":"assistant","parentID":"u1","finish":"stop","time":{"completed":1790088002000}}');
+        """) else {
+            suite.expect(false, "revert database opens")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cursor = AgentLogCursor(path: path, provider: .opencode)
+        _ = openCodeRead(cursor)
+        // A revert deletes the newest messages; the next prompt takes the rowid a1 had.
+        openCodeExec(path, """
+        DELETE FROM message WHERE id = 'a1';
+        INSERT INTO message VALUES ('u2', 's_r', 1790088010000, 1790088010000, '{"role":"user"}');
+        """)
+        suite.expect(openCodeRead(cursor).map { $0["id"] as? String } == ["u2"],
+                     "a prompt saved in the place of reverted messages is read")
+        openCodeExec(path, """
+        DELETE FROM message;
+        INSERT INTO message VALUES ('u3', 's_r', 1790088020000, 1790088020000, '{"role":"user"}');
+        """)
+        let rows = openCodeRead(cursor)
+        suite.expect(rows.first?["type"] as? String == "reset" && rows.dropFirst().map { $0["id"] as? String } == ["u3"],
+                     "when every row read last is gone, reading starts over and says so")
+    }
+
+    private static func openCodeOpenReplies(_ suite: TestSuite) {
+        guard let (folder, path) = openCodeDatabase("""
+        INSERT INTO session VALUES ('s_o', '/code/app', NULL, 1790088000000, 1790088000000);
+        INSERT INTO message VALUES ('u1', 's_o', 1790088000000, 1790088000000, '{"role":"user"}');
+        INSERT INTO message VALUES ('a1', 's_o', 1790088001000, 1790088001000, '{"role":"assistant","parentID":"u1","time":{"created":1790088001000}}');
+        """) else {
+            suite.expect(false, "open reply database opens")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cursor = AgentLogCursor(path: path, provider: .opencode)
+        _ = openCodeRead(cursor)
+        suite.expect(openCodeRead(cursor).isEmpty, "a reply still being written is skipped while it is unchanged")
+        openCodeExec(path, """
+        UPDATE message SET time_updated = 1790088005000, data = '{"role":"assistant","parentID":"u1","tokens":{"input":5},"time":{"created":1790088001000}}' WHERE id = 'a1';
+        """)
+        suite.expect(openCodeRead(cursor).map { $0["id"] as? String } == ["a1"], "a reply being written is read when it changes")
+        openCodeExec(path, """
+        UPDATE message SET time_updated = 1790088009000, data = '{"role":"assistant","parentID":"u1","tokens":{"input":9},"finish":"stop","time":{"created":1790088001000,"completed":1790088009000}}' WHERE id = 'a1';
+        """)
+        suite.expect(openCodeRead(cursor).first?["finish"] as? String == "stop", "its completion is read")
+        openCodeExec(path, "UPDATE message SET time_updated = 1790088012000 WHERE id = 'a1';")
+        suite.expect(openCodeRead(cursor).isEmpty, "a completed reply is not looked up again")
+    }
+
+    // MARK: OpenCode stopped loops
+
+    private static func openCodeStoppedLoops(_ suite: TestSuite, now: Date) {
+        func at(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: seconds) }
+
+        // A tool call rejected: the step completes with tool calls and the
+        // loop stops. A new prompt comes a couple of minutes later.
+        var state = AgentLogState()
+        let store = AgentUsageStore()
+        store.reportsTransitions = true
+        var events: [AgentUsageEvent] = []
+        func feed(_ json: String, at seconds: TimeInterval) -> [AgentLogEntry] {
+            let entries = AgentLogParser.parseOpenCode(line(json), state: &state, now: now)
+            events += store.apply(entries, file: "db#s_x", provider: .opencode, tracksTurns: true, modified: now,
+                                  now: at(seconds))
+            return entries
+        }
+        _ = feed(#"{"id":"u1","session_id":"s_x","time_created":1790091000,"role":"user"}"#, at: 1_790_091_000)
+        let rejected = feed(#"{"id":"a1","parentID":"u1","session_id":"s_x","time_created":1790091001,"role":"assistant","cost":0.05,"tokens":{"input":500,"output":50},"finish":"tool-calls","time":{"created":1790091001000,"completed":1790091005000}}"#, at: 1_790_091_005)
+        suite.expect(rejected.contains(.turnSettled(at(1_790_091_005))) && store.live.count == 1,
+                     "a step that completed with tool calls leaves the turn waiting for the next step")
+        suite.expect(!store.closeSettledTurns(now: at(1_790_091_010)) && store.live.count == 1,
+                     "the turn goes on while the next step can still start")
+        suite.expect(store.closeSettledTurns(now: at(1_790_091_040)) && store.live.isEmpty && events.isEmpty,
+                     "with no next step the loop stopped, and its turn ends without a notice")
+        let prompt = feed(#"{"id":"u2","session_id":"s_x","time_created":1790091120,"role":"user"}"#, at: 1_790_091_120)
+        suite.expect(prompt == [.turnEnded(at(1_790_091_005), completed: false, duration: nil), .turnBegan(at(1_790_091_120))],
+                     "a later prompt closes the stopped task quietly and opens its own")
+        let answer = feed(#"{"id":"a2","parentID":"u2","session_id":"s_x","time_created":1790091121,"role":"assistant","cost":0.01,"tokens":{"input":100,"output":10},"finish":"stop","time":{"created":1790091121000,"completed":1790091130000}}"#, at: 1_790_091_130)
+        suite.expect(answer.contains(.turnEnded(at(1_790_091_130), completed: true, duration: 10))
+                        && events == [.finished(provider: .opencode, duration: 10, cost: 0.01, tokens: 110, project: "")],
+                     "the new task's notice counts from its own prompt and only its own cost")
+
+        // OpenCode's own request right after a step is no new task.
+        var own = AgentLogState()
+        _ = AgentLogParser.parseOpenCode(line(#"{"id":"u1","session_id":"s_y","time_created":1790091200,"role":"user"}"#), state: &own, now: now)
+        _ = AgentLogParser.parseOpenCode(line(#"{"id":"a1","parentID":"u1","session_id":"s_y","time_created":1790091201,"role":"assistant","tokens":{"input":5},"finish":"tool-calls","time":{"completed":1790091205000}}"#), state: &own, now: now)
+        suite.expect(AgentLogParser.parseOpenCode(line(#"{"id":"c1","session_id":"s_y","time_created":1790091206,"role":"user"}"#), state: &own, now: now)
+                        == [.turnActive(at(1_790_091_206))],
+                     "a prompt OpenCode writes right after a step is activity")
+
+        // OpenCode killed in the middle of a reply, then started again.
+        var killed = AgentLogState()
+        _ = AgentLogParser.parseOpenCode(line(#"{"id":"u1","session_id":"s_k","time_created":1790091300,"role":"user"}"#), state: &killed, now: now)
+        _ = AgentLogParser.parseOpenCode(line(#"{"id":"a1","parentID":"u1","session_id":"s_k","time_created":1790091301,"role":"assistant","tokens":{"input":5}}"#), state: &killed, now: now)
+        let later = AgentLogParser.parseOpenCode(line(#"{"id":"u2","session_id":"s_k","time_created":1790178000,"role":"user"}"#), state: &killed, now: now)
+        let restarted = AgentLogParser.parseOpenCode(line(#"{"id":"a2","parentID":"u2","session_id":"s_k","time_created":1790178001,"role":"assistant","tokens":{"input":5},"finish":"stop","time":{"completed":1790178010000}}"#), state: &killed, now: now)
+        suite.expect(later == [.turnActive(at(1_790_178_000))]
+                        && restarted.starts(with: [.turnEnded(nil, completed: false, duration: nil), .turnBegan(at(1_790_178_000))])
+                        && restarted.contains(.turnEnded(at(1_790_178_010), completed: true, duration: 10)),
+                     "a reply to a newer prompt while an older reply never completed starts the task over from that prompt")
+
+        // A prompt sent during a long command joins the task.
+        var long = AgentLogState()
+        var all: [AgentLogEntry] = []
+        for json in [
+            #"{"id":"u1","session_id":"s_l","time_created":1790091400,"role":"user"}"#,
+            #"{"id":"a1","parentID":"u1","session_id":"s_l","time_created":1790091401,"role":"assistant","tokens":{"input":5}}"#,
+            #"{"id":"u2","session_id":"s_l","time_created":1790092300,"role":"user"}"#,
+            #"{"id":"a1","parentID":"u1","session_id":"s_l","time_created":1790091401,"role":"assistant","tokens":{"input":9},"finish":"tool-calls","time":{"completed":1790092400000}}"#,
+            #"{"id":"a2","parentID":"u2","session_id":"s_l","time_created":1790092401,"role":"assistant","tokens":{"input":5},"finish":"stop","time":{"completed":1790092410000}}"#,
+        ] {
+            all += AgentLogParser.parseOpenCode(line(json), state: &long, now: now)
+        }
+        suite.expect(all.filter { if case .turnBegan = $0 { return true }; return false }.count == 1
+                        && all.filter { if case .turnEnded = $0 { return true }; return false }
+                            == [.turnEnded(at(1_790_092_410), completed: true, duration: 1010)],
+                     "a prompt sent while a long command runs joins the task, which ends once")
     }
 
     private static func timestamps(_ suite: TestSuite) {

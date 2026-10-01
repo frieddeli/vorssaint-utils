@@ -22,6 +22,8 @@ final class AgentUsageStore {
     private(set) var waiting: [String: AgentLiveSession] = [:]
     /// Claude turns whose process was seen running, by log file.
     private var registered: Set<String> = []
+    /// Turns whose last step ended expecting more, by log file, with when.
+    private var settled: [String: Date] = [:]
     /// Off while the logs are first read, so history never replays as news.
     var reportsTransitions = false
     /// A turn that ended longer ago than this is history found late, like a
@@ -63,6 +65,7 @@ final class AgentUsageStore {
                 codexPlanObserved = date
             case .turnBegan(let date):
                 guard tracksTurns else { continue }
+                settled[file] = nil
                 // A log rewritten in place is read again from its start; the
                 // turn it already holds keeps what its responses added, which
                 // the second reading skips as repeats.
@@ -73,6 +76,7 @@ final class AgentUsageStore {
                                                model: "", project: "", tokens: AgentTokens(), cost: 0)
             case .turnActive(let date):
                 guard tracksTurns else { continue }
+                settled[file] = nil
                 let moment = date ?? modified
                 if var turn = turns[file] ?? waiting.removeValue(forKey: file) {
                     turn.lastActivity = max(turn.lastActivity, moment)
@@ -81,8 +85,14 @@ final class AgentUsageStore {
                     turns[file] = AgentLiveSession(id: file, provider: provider, started: moment, lastActivity: moment,
                                                    model: "", project: "", tokens: AgentTokens(), cost: 0)
                 }
+            case .turnSettled(let date):
+                guard tracksTurns, var turn = turns[file] ?? waiting.removeValue(forKey: file) else { continue }
+                turn.lastActivity = max(turn.lastActivity, date)
+                turns[file] = turn
+                settled[file] = date
             case .turnEnded(let date, let completed, let duration):
                 guard tracksTurns else { continue }
+                settled[file] = nil
                 // A turn that went quiet on the way ends as the whole turn.
                 let quiet = waiting.removeValue(forKey: file)
                 guard let turn = turns.removeValue(forKey: file) ?? quiet, completed, reportsTransitions else { continue }
@@ -104,6 +114,7 @@ final class AgentUsageStore {
     @discardableResult
     func forget(file: String) -> Bool {
         waiting[file] = nil
+        settled = settled.filter { $0.key != file && !$0.key.hasPrefix(file + "#") }
         var removed = turns.removeValue(forKey: file) != nil
         for key in turns.keys where key.hasPrefix(file + "#") {
             turns.removeValue(forKey: key)
@@ -215,7 +226,10 @@ final class AgentUsageStore {
         for position in records.indices {
             guard !records[position].reportedCost else { continue }
             let priced = AgentPricing.cost(billables[position], model: records[position].model)
-            records[position].cost = priced.cost
+            // A zero OpenCode recorded for a model the list still does not
+            // know stays that reply's cost.
+            let recordedZero = records[position].provider == .opencode && records[position].cost == 0
+            records[position].cost = priced.cost ?? (recordedZero ? 0 : nil)
             records[position].savings = priced.savings
         }
     }
@@ -246,6 +260,21 @@ final class AgentUsageStore {
             waiting[file] = turn
         }
         waiting = waiting.filter { now.timeIntervalSince($0.value.lastActivity) < Self.resumeWindow(for: $0.value.provider) }
+    }
+
+    /// A turn whose last step ended expecting more, with nothing after it
+    /// for a while, stopped there, as when OpenCode's loop stops on a
+    /// rejected tool call: it ends without a notice, since nothing finished.
+    /// True when one was showing.
+    @discardableResult
+    func closeSettledTurns(now: Date) -> Bool {
+        var removed = false
+        for (file, date) in settled where now.timeIntervalSince(date) >= AgentLogParser.openCodeSettle {
+            settled[file] = nil
+            waiting[file] = nil
+            if turns.removeValue(forKey: file) != nil { removed = true }
+        }
+        return removed
     }
 
     /// A Claude session quit or killed in the middle of a turn, as when its
@@ -372,9 +401,8 @@ final class AgentLogCursor {
     let tracksTurns: Bool
     /// The session log a Claude subagent works for.
     let parent: String?
-    /// OpenCode rows read within the look-back, by id, with when each was
-    /// saved and the revision handed over.
-    var recentRows: [String: (stamp: Int64, revision: Int)] = [:]
+    /// Replies still being written and the rows read last, for a database.
+    var openCode = AgentOpenCodeProgress()
     var offset: UInt64 = 0
     var identity: UInt64 = 0
     var pending = Data()

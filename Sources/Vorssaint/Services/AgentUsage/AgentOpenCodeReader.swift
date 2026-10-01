@@ -4,15 +4,24 @@
 import Foundation
 import SQLite3
 
+/// How far reading one OpenCode database has got, beside the last rowid
+/// read that `AgentLogCursor.offset` holds.
+struct AgentOpenCodeProgress {
+    /// Replies still being written, by id, with what they held when read.
+    var open: [String: (updated: Int64, length: Int64, changed: Date)] = [:]
+    /// The rows read last, oldest first.
+    var tail: [(rowid: Int64, id: String)] = []
+}
+
 /// Reads OpenCode sessions and messages from its SQLite database (~/.local/share/opencode/opencode.db).
 enum AgentOpenCodeReader {
     /// The one database OpenCode keeps in its data folder.
     static let database = "opencode.db"
 
-    /// Rows are found by when they were saved. One can commit a moment after
-    /// a newer row another session saved, so each read looks back this far
-    /// and skips the revisions it already handed over.
-    static let lookBack: Int64 = 5 * 60 * 1000
+    /// Rows read last, newest last, to notice when the newest were deleted.
+    static let tailLength = 64
+    /// A reply that has not changed for this long is not being written any more.
+    static let abandoned: TimeInterval = 86_400
 
     /// When the database or its write-ahead log last changed; nil when there
     /// is no database.
@@ -28,9 +37,15 @@ enum AgentOpenCodeReader {
         Date(timeIntervalSince1970: TimeInterval(time.tv_sec) + TimeInterval(time.tv_nsec) / 1_000_000_000)
     }
 
-    /// Reads messages saved since `cursor.offset` (millisecond timestamp), or
-    /// since `horizon` on a first read. Calls `line` with a JSON payload for
-    /// each message.
+    /// Reads the messages saved since the last read, or since `horizon` on a
+    /// first read, and the replies still being written that changed since.
+    /// Calls `line` with a JSON payload for each.
+    ///
+    /// OpenCode indexes messages by session only, so a filter on their times
+    /// would walk the whole table. SQLite stores rows in the order they were
+    /// saved and keeps that place when a row is updated: new rows are the
+    /// ones past `cursor.offset`, the last rowid read, and the only rows that
+    /// change afterwards are replies still being written, looked up by id.
     static func readAppended(_ cursor: AgentLogCursor, since horizon: Date = .distantPast,
                              shouldContinue: () -> Bool = { true }, line: (Data) -> Void) {
         guard shouldContinue() else { return }
@@ -42,12 +57,7 @@ enum AgentOpenCodeReader {
         if identity != cursor.identity {
             let replaced = cursor.identity != 0
             cursor.identity = identity
-            cursor.offset = 0
-            cursor.recentRows.removeAll()
-            cursor.state = AgentLogState()
-            if replaced {
-                line(Data(#"{"type":"reset"}"#.utf8))
-            }
+            restart(cursor, announce: replaced, line: line)
         }
         cursor.modified = modified(cursor.path) ?? date(info.st_mtimespec)
 
@@ -57,6 +67,13 @@ enum AgentOpenCodeReader {
         }
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 2000)
+
+        // Reverting a session deletes its newest messages, and SQLite gives
+        // their rowids to the next ones saved.
+        if !resumes(db, cursor) { restart(cursor, announce: true, line: line) }
+        if cursor.offset == 0 {
+            cursor.offset = UInt64(firstRow(db, since: Int64(max(0, horizon.timeIntervalSince1970) * 1000)))
+        }
 
         let hasParentID = exists(db, "SELECT 1 FROM pragma_table_info('session') WHERE name = 'parent_id'")
         let hasParts = exists(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'part'")
@@ -81,74 +98,168 @@ enum AgentOpenCodeReader {
                 AND \(field("p.data", "$.type")) = 'compaction' AND \(field("p.data", "$.auto")) = 1)
             ELSE 0 END
             """ : "0"
-
-        let floor = Int64(max(0, horizon.timeIntervalSince1970) * 1000)
-        let since = cursor.offset == 0 ? floor : max(floor, Int64(cursor.offset) - lookBack)
+        // A reply is written until it records when it completed.
+        let writing = """
+            coalesce(\(field("m.data", "$.role")) = 'assistant'
+                AND \(field("m.data", "$.time.completed")) IS NULL, 0)
+            """
         let parentCol = hasParentID ? "s.parent_id" : "NULL"
-        let query = """
-        SELECT m.id, m.session_id, m.time_created, m.time_updated, s.directory, \(parentCol), m.data,
-            \(toolCalls), \(autoCompaction)
+        let select = """
+        SELECT m.rowid, m.id, m.session_id, m.time_created, m.time_updated, length(m.data), s.directory,
+            \(parentCol), m.data, \(toolCalls), \(autoCompaction), \(writing)
         FROM message m
         JOIN session s ON m.session_id = s.id
-        WHERE max(m.time_created, coalesce(m.time_updated, m.time_created)) >= ?
-        ORDER BY m.time_created ASC, m.time_updated ASC
         """
+        let now = Date()
 
+        // Replies still being written, before anything saved after them.
+        let open = Array(cursor.openCode.open.keys)
+        if !open.isEmpty {
+            let marks = Array(repeating: "?", count: open.count).joined(separator: ", ")
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, select + " WHERE m.id IN (\(marks)) ORDER BY m.rowid", -1, &stmt, nil) == SQLITE_OK
+            else { return }
+            defer { sqlite3_finalize(stmt) }
+            for (index, id) in open.enumerated() {
+                sqlite3_bind_text(stmt, Int32(index + 1), id, -1, transient)
+            }
+            var found = Set<String>()
+            while shouldContinue() && sqlite3_step(stmt) == SQLITE_ROW {
+                guard let id = text(stmt, 1), let known = cursor.openCode.open[id] else { continue }
+                found.insert(id)
+                let updated = sqlite3_column_int64(stmt, 4)
+                let length = sqlite3_column_int64(stmt, 5)
+                // Unchanged since the last read: nothing is copied or parsed.
+                if updated == known.updated && length == known.length {
+                    if now.timeIntervalSince(known.changed) > abandoned { cursor.openCode.open[id] = nil }
+                    continue
+                }
+                handOver(stmt, cursor: cursor, now: now, line: line)
+            }
+            // A reply deleted with its session or by a revert is written no more.
+            guard shouldContinue() else { return }
+            for id in open where !found.contains(id) { cursor.openCode.open[id] = nil }
+        }
+
+        // Everything saved since the last read.
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else {
+        guard sqlite3_prepare_v2(db, select + " WHERE m.rowid > ? ORDER BY m.rowid", -1, &stmt, nil) == SQLITE_OK
+        else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(cursor.offset))
+        while shouldContinue() && sqlite3_step(stmt) == SQLITE_ROW {
+            let rowid = sqlite3_column_int64(stmt, 0)
+            cursor.offset = UInt64(max(0, rowid))
+            if let id = text(stmt, 1) {
+                cursor.openCode.tail.append((rowid, id))
+                if cursor.openCode.tail.count > tailLength { cursor.openCode.tail.removeFirst() }
+            }
+            handOver(stmt, cursor: cursor, now: now, line: line)
+        }
+    }
+
+    /// Hands over the row `stmt` stands on, and keeps a reply still being
+    /// written to look at again.
+    private static func handOver(_ stmt: OpaquePointer?, cursor: AgentLogCursor, now: Date, line: (Data) -> Void) {
+        // A later version could leave any of these empty; such a row is
+        // skipped rather than read as if it held a value.
+        guard let id = text(stmt, 1), let sessionID = text(stmt, 2), let dataStr = text(stmt, 8),
+              sqlite3_column_type(stmt, 3) != SQLITE_NULL else { return }
+        let created = sqlite3_column_int64(stmt, 3)
+        let updated = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? created : sqlite3_column_int64(stmt, 4)
+        if sqlite3_column_int64(stmt, 11) != 0 {
+            cursor.openCode.open[id] = (sqlite3_column_int64(stmt, 4), sqlite3_column_int64(stmt, 5), now)
+        } else {
+            cursor.openCode.open[id] = nil
+        }
+
+        guard var json = (try? JSONSerialization.jsonObject(with: Data(dataStr.utf8))) as? [String: Any] else {
             return
         }
+        json["id"] = id
+        json["session_id"] = sessionID
+        json["parent_session_id"] = text(stmt, 7) ?? ""
+        json["directory"] = text(stmt, 6) ?? ""
+        json["time_created"] = created
+        json["time_updated"] = updated
+        if sqlite3_column_int64(stmt, 9) != 0 { json["tool_calls"] = true }
+        if sqlite3_column_int64(stmt, 10) != 0 { json["auto_compaction"] = true }
+
+        if let mergedData = try? JSONSerialization.data(withJSONObject: json) {
+            line(mergedData)
+        }
+    }
+
+    /// Starts over from the horizon, telling the parser to forget what the
+    /// earlier reading left open.
+    private static func restart(_ cursor: AgentLogCursor, announce: Bool, line: (Data) -> Void) {
+        cursor.offset = 0
+        cursor.openCode = AgentOpenCodeProgress()
+        cursor.state = AgentLogState()
+        if announce {
+            line(Data(#"{"type":"reset"}"#.utf8))
+        }
+    }
+
+    /// False when every row read last is gone or holds another message, so
+    /// the place reached means nothing. When only the newest were deleted,
+    /// reading goes on after the newest one still there.
+    private static func resumes(_ db: OpaquePointer?, _ cursor: AgentLogCursor) -> Bool {
+        let tail = cursor.openCode.tail
+        guard !tail.isEmpty else { return true }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT id FROM message WHERE rowid = ?", -1, &stmt, nil) == SQLITE_OK else {
+            return true
+        }
         defer { sqlite3_finalize(stmt) }
+        for position in tail.indices.reversed() {
+            sqlite3_reset(stmt)
+            sqlite3_bind_int64(stmt, 1, tail[position].rowid)
+            guard sqlite3_step(stmt) == SQLITE_ROW, text(stmt, 0) == tail[position].id else { continue }
+            cursor.offset = UInt64(tail[position].rowid)
+            cursor.openCode.tail.removeLast(tail.count - 1 - position)
+            return true
+        }
+        return false
+    }
 
-        sqlite3_bind_int64(stmt, 1, since)
-
-        var newest = Int64(cursor.offset)
-
-        while shouldContinue() && sqlite3_step(stmt) == SQLITE_ROW {
-            // A later version could leave any of these empty; such a row is
-            // skipped rather than read as if it held a value.
-            guard let id = text(stmt, 0), let sessionID = text(stmt, 1), let dataStr = text(stmt, 6),
-                  sqlite3_column_type(stmt, 2) != SQLITE_NULL else { continue }
-            let created = sqlite3_column_int64(stmt, 2)
-            let updated = sqlite3_column_type(stmt, 3) == SQLITE_NULL ? created : sqlite3_column_int64(stmt, 3)
-            let directory = text(stmt, 4) ?? ""
-            let parentID = text(stmt, 5) ?? ""
-
-            let stamp = max(created, updated)
-            newest = max(newest, stamp)
-            // A prompt read once is known; later saves only add its summary.
-            // A reply is read again whenever what it holds changes.
-            let isUser = dataStr.contains("\"role\":\"user\"") || dataStr.contains("\"role\": \"user\"")
-            var hasher = Hasher()
-            if !isUser {
-                hasher.combine(updated)
-                hasher.combine(dataStr)
-            }
-            let revision = hasher.finalize()
-            if let seen = cursor.recentRows[id], isUser || seen.revision == revision { continue }
-            cursor.recentRows[id] = (stamp, revision)
-
-            guard var json = (try? JSONSerialization.jsonObject(with: Data(dataStr.utf8))) as? [String: Any] else {
+    /// The rowid just before the first message created at `floor` or later.
+    /// Rows are stored in the order they were saved, so their times only
+    /// grow along them, and a binary search finds the place in a few steps.
+    private static func firstRow(_ db: OpaquePointer?, since floor: Int64) -> Int64 {
+        guard floor > 0 else { return 0 }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT rowid, time_created FROM message WHERE rowid >= ? ORDER BY rowid LIMIT 1",
+                                 -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        var last: OpaquePointer?
+        var high: Int64 = 0
+        if sqlite3_prepare_v2(db, "SELECT max(rowid) FROM message", -1, &last, nil) == SQLITE_OK,
+           sqlite3_step(last) == SQLITE_ROW {
+            high = sqlite3_column_int64(last, 0)
+        }
+        sqlite3_finalize(last)
+        var low: Int64 = 0
+        // Everything up to `low` is older than the floor; the answer is at most `high`.
+        while low < high {
+            let middle = low + (high - low + 1) / 2
+            sqlite3_reset(stmt)
+            sqlite3_bind_int64(stmt, 1, middle)
+            guard sqlite3_step(stmt) == SQLITE_ROW else {
+                high = middle - 1
                 continue
             }
-            json["id"] = id
-            json["session_id"] = sessionID
-            json["parent_session_id"] = parentID
-            json["directory"] = directory
-            json["time_created"] = created
-            json["time_updated"] = updated
-            if sqlite3_column_int64(stmt, 7) != 0 { json["tool_calls"] = true }
-            if sqlite3_column_int64(stmt, 8) != 0 { json["auto_compaction"] = true }
-
-            if let mergedData = try? JSONSerialization.data(withJSONObject: json) {
-                line(mergedData)
+            let rowid = sqlite3_column_int64(stmt, 0)
+            if sqlite3_column_type(stmt, 1) == SQLITE_NULL || sqlite3_column_int64(stmt, 1) < floor {
+                low = rowid
+            } else {
+                high = middle - 1
             }
         }
-
-        cursor.offset = UInt64(max(0, newest))
-        let kept = newest - lookBack
-        cursor.recentRows = cursor.recentRows.filter { $0.value.stamp >= kept }
+        return low
     }
+
+    private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     private static func text(_ stmt: OpaquePointer?, _ column: Int32) -> String? {
         sqlite3_column_text(stmt, column).map { String(cString: $0) }

@@ -1004,7 +1004,7 @@ extension NotchAgentStrings {
     static let tr = NotchAgentStrings(
         title: "YZ Ajanları",
         hubDescription: "Claude, Codex ve OpenCode için plan sınırlarını, token’ları, API değerini ve süren işleri Dynamic Island’dan izleyin.",
-        settingsDescription: "Claude Code, Codex ve OpenCode’in bu Mac’e kaydettiği kullanımı ve Claude uygulamasının kaydettiği plan sınırlarını okur. İstemler, yanıtlar ve dosyalar asla saklanmaz ve kullanımınız Mac’inizden asla çıkmaz.",
+        settingsDescription: "Claude Code, Codex ve OpenCode’un bu Mac’e kaydettiği kullanımı ve Claude uygulamasının kaydettiği plan sınırlarını okur. İstemler, yanıtlar ve dosyalar asla saklanmaz ve kullanımınız Mac’inizden asla çıkmaz.",
         restingTitle: "YZ sınırları",
         limitsCard: "Sınırlar",
         spendCard: "Harcama",
