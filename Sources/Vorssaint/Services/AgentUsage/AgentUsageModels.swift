@@ -6,7 +6,7 @@ import Foundation
 /// The coding agents whose session logs the island reads. Their names are
 /// product names and stay untranslated.
 enum AgentProvider: String, CaseIterable, Identifiable, Codable {
-    case claude, codex, antigravity
+    case claude, codex, opencode, antigravity
 
     var id: String { rawValue }
 
@@ -14,6 +14,7 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .claude: return "Claude"
         case .codex: return "Codex"
+        case .opencode: return "OpenCode"
         case .antigravity: return "Antigravity"
         }
     }
@@ -22,6 +23,7 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .claude: return "sparkle"
         case .codex: return "chevron.left.forwardslash.chevron.right"
+        case .opencode: return "terminal"
         case .antigravity: return "sparkles"
         }
     }
@@ -71,6 +73,8 @@ struct AgentUsageRecord: Equatable {
     var cost: Double?
     /// What cache reads saved against paying the full input price.
     var savings: Double
+    /// Whether cost was reported directly by the provider rather than derived from list pricing.
+    var reportedCost: Bool = false
 }
 
 /// A usage allowance and how much of it is spent, as the provider reports it.

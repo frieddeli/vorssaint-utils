@@ -140,6 +140,9 @@ enum NotchHoverTests {
         func fixture(physical: Bool = false) -> Service {
             DispatchQueue.main = NotchScreenRefreshContract.Scheduler()
             UserDefaults.standard = UserDefaults.Preferences()
+            // Each case starts with no observers left by a pointer an earlier case never moved.
+            NSEvent.global = [:]
+            NSEvent.local = [:]
             AssistiveKeyboard.active = false
             NSWorkspace.shared.accessibilityDisplayShouldReduceMotion = false
             let service = Service()
@@ -262,6 +265,11 @@ enum NotchHoverTests {
             DispatchQueue.main.advance(0.09)
             suite.expect(service.closures == 1 && service.hoverWork == nil,
                    "leaving either display's expanded island closes it within 190 ms")
+            // The exit reported inside started following the pointer; the next
+            // move after the island closed hands hover back to window tracking.
+            for handler in Array(NSEvent.global.values) { handler(NSEvent()) }
+            suite.expect(NSEvent.global.isEmpty && NSEvent.local.isEmpty,
+                   "the first move after the hover-opened island closed releases the pointer observers")
         }
         for physical in [false, true] {
             for local in [false, true] {
@@ -450,6 +458,61 @@ enum NotchHoverTests {
         clickOpened.hover(false)
         suite.expect(NSEvent.global.isEmpty && NSEvent.local.isEmpty,
                      "an island opened by a click, which leaving does not close, never follows the pointer")
+        // Passing quickly over the closed island to a display above: the last
+        // exit arrives while the pointer still touches the island's top edge.
+        do {
+            let passed = fixture()
+            let top = passed.windowHost!.rect
+            NSEvent.mouseLocation = CGPoint(x: top.midX, y: top.maxY - 1)
+            passed.hover(true)
+            passed.hover(false)
+            suite.expect(passed.hoverEmphasized && NSEvent.global.count == 1 && NSEvent.local.count == 1,
+                         "an exit reported at the top edge keeps the emphasis and follows the pointer")
+            follow(to: CGPoint(x: top.midX, y: top.maxY + 300))
+            suite.expect(!passed.hoverEmphasized && !passed.inside,
+                         "the first move on the display above clears the closed island's hover emphasis")
+            suite.expect(NSEvent.global.isEmpty && NSEvent.local.isEmpty,
+                         "the closed island stops following the pointer once the emphasis is gone")
+            // Fast enough, AppKit reports no exit at all after the entry.
+            let silent = fixture()
+            NSEvent.mouseLocation = CGPoint(x: top.midX, y: top.maxY - 1)
+            silent.hover(true)
+            suite.expect(silent.hoverEmphasized && NSEvent.global.count == 1 && NSEvent.local.count == 1,
+                         "the closed island follows the pointer while its hover emphasis shows")
+            follow(to: CGPoint(x: top.midX + 10, y: top.maxY - 2))
+            suite.expect(silent.hoverEmphasized, "moving over the island keeps its hover emphasis")
+            follow(to: CGPoint(x: top.midX, y: top.maxY + 300))
+            suite.expect(!silent.hoverEmphasized && NSEvent.global.isEmpty && NSEvent.local.isEmpty,
+                         "an unreported exit to the display above still clears the emphasis and its observers")
+        }
+        // A timed capture still attached to the closed island would hear each
+        // followed move as the pointer leaving and restart its dismissal.
+        do {
+            let attached = fixture()
+            var previewHovered: Bool?
+            attached.captureHover = { previewHovered = $0 }
+            let top = attached.windowHost!.rect
+            NSEvent.mouseLocation = CGPoint(x: top.midX, y: top.maxY - 1)
+            attached.hover(true)
+            suite.expect(attached.hoverEmphasized && previewHovered == true
+                            && NSEvent.global.isEmpty && NSEvent.local.isEmpty,
+                         "the closed island holding a capture keeps it paused and does not follow the pointer")
+        }
+        // Opening or peeking on hover ends the closed island's follow at once,
+        // so the next move cannot tell a page or preview the pointer left.
+        for expands in [true, false] {
+            let opening = fixture()
+            UserDefaults.standard.expands = expands
+            let top = opening.windowHost!.rect
+            NSEvent.mouseLocation = CGPoint(x: top.midX, y: top.maxY - 1)
+            opening.hover(true)
+            suite.expect(opening.hoverEmphasized && NSEvent.global.count == 1,
+                         "the emphasized island follows the pointer before it opens")
+            DispatchQueue.main.advance(0.26)
+            suite.expect((expands ? opening.openings == 1 : opening.peeking)
+                            && NSEvent.global.isEmpty && NSEvent.local.isEmpty,
+                         "opening or peeking on hover drops the closed island's pointer observers")
+        }
         for disable: (Service) -> Void in [
             { $0.suspended = true }, { $0.windowHost = nil },
             { _ in UserDefaults.standard.hides = false }, { _ in UserDefaults.standard.enabled = false }

@@ -156,7 +156,7 @@ extension FeatureStrings {
             cameraSummary: "A mirror to check yourself before a call.",
             downloadsSummary: "Downloads in progress and just finished.",
             scratchpadSummary: "Quick notes that save by themselves.",
-            agentsSummary: "Claude Code, Codex and Antigravity usage, limits and costs."
+            agentsSummary: "Claude Code, Codex, OpenCode and Antigravity usage, limits and costs."
         )
         case .ptBR: return NotchEditorStrings(
             layout: "Layout",
@@ -219,7 +219,7 @@ extension FeatureStrings {
             cameraSummary: "Um espelho para se ver antes de uma chamada.",
             downloadsSummary: "Downloads em andamento e os que acabaram de terminar.",
             scratchpadSummary: "Anotações rápidas que se salvam sozinhas.",
-            agentsSummary: "Uso, limites e custos do Claude Code, do Codex e do Antigravity."
+            agentsSummary: "Uso, limites e custos do Claude Code, do Codex, do OpenCode e do Antigravity."
         )
         case .es: return NotchEditorStrings(
             layout: "Diseño",
@@ -282,7 +282,7 @@ extension FeatureStrings {
             cameraSummary: "Un espejo para verte antes de una llamada.",
             downloadsSummary: "Descargas en curso y las recién terminadas.",
             scratchpadSummary: "Notas rápidas que se guardan solas.",
-            agentsSummary: "Uso, límites y costes de Claude Code, Codex y Antigravity."
+            agentsSummary: "Uso, límites y costes de Claude Code, Codex, OpenCode y Antigravity."
         )
         case .sk: return NotchEditorStrings(
             layout: "Rozloženie",
@@ -345,7 +345,7 @@ extension FeatureStrings {
             cameraSummary: "Zrkadlo, v ktorom sa pred hovorom skontrolujete.",
             downloadsSummary: "Prebiehajúce a práve dokončené sťahovania.",
             scratchpadSummary: "Rýchle poznámky, ktoré sa ukladajú samy.",
-            agentsSummary: "Využitie, limity a náklady Claude Code, Codexu a Antigravity."
+            agentsSummary: "Využitie, limity a náklady Claude Code, Codexu, OpenCode a Antigravity."
         )
         case .de: return NotchEditorStrings(
             layout: "Layout",
@@ -408,7 +408,7 @@ extension FeatureStrings {
             cameraSummary: "Ein Spiegel, um dich vor einem Anruf zu sehen.",
             downloadsSummary: "Laufende und gerade fertige Downloads.",
             scratchpadSummary: "Schnelle Notizen, die sich selbst sichern.",
-            agentsSummary: "Nutzung, Limits und Kosten von Claude Code, Codex und Antigravity."
+            agentsSummary: "Nutzung, Limits und Kosten von Claude Code, Codex, OpenCode und Antigravity."
         )
         case .fr: return NotchEditorStrings(
             layout: "Disposition",
@@ -471,7 +471,7 @@ extension FeatureStrings {
             cameraSummary: "Un miroir pour vous voir avant un appel.",
             downloadsSummary: "Les téléchargements en cours et ceux qui viennent de finir.",
             scratchpadSummary: "Des notes rapides qui s’enregistrent seules.",
-            agentsSummary: "Utilisation, limites et coûts de Claude Code, Codex et Antigravity."
+            agentsSummary: "Utilisation, limites et coûts de Claude Code, Codex, OpenCode et Antigravity."
         )
         case .it: return NotchEditorStrings(
             layout: "Layout",
@@ -534,7 +534,7 @@ extension FeatureStrings {
             cameraSummary: "Uno specchio per guardarti prima di una chiamata.",
             downloadsSummary: "Download in corso e appena completati.",
             scratchpadSummary: "Note veloci che si salvano da sole.",
-            agentsSummary: "Uso, limiti e costi di Claude Code, Codex e Antigravity."
+            agentsSummary: "Uso, limiti e costi di Claude Code, Codex, OpenCode e Antigravity."
         )
         case .ru: return NotchEditorStrings(
             layout: "Макет",
@@ -597,7 +597,7 @@ extension FeatureStrings {
             cameraSummary: "Зеркало, чтобы посмотреть на себя перед звонком.",
             downloadsSummary: "Текущие и только что завершённые загрузки.",
             scratchpadSummary: "Быстрые заметки, которые сохраняются сами.",
-            agentsSummary: "Использование, лимиты и стоимость Claude Code, Codex и Antigravity."
+            agentsSummary: "Использование, лимиты и стоимость Claude Code, Codex, OpenCode и Antigravity."
         )
         case .tr: return NotchEditorStrings(
             layout: "Yerleşim",
@@ -660,7 +660,7 @@ extension FeatureStrings {
             cameraSummary: "Aramadan önce kendinize bakmak için bir ayna.",
             downloadsSummary: "Süren ve yeni biten indirmeler.",
             scratchpadSummary: "Kendi kendine kaydedilen hızlı notlar.",
-            agentsSummary: "Claude Code, Codex ve Antigravity kullanımı, sınırları ve maliyetleri."
+            agentsSummary: "Claude Code, Codex, OpenCode ve Antigravity kullanımı, sınırları ve maliyetleri."
         )
         case .ja: return NotchEditorStrings(
             layout: "レイアウト",
@@ -723,7 +723,7 @@ extension FeatureStrings {
             cameraSummary: "通話前に身だしなみを確認できるミラー。",
             downloadsSummary: "進行中と完了したばかりのダウンロード。",
             scratchpadSummary: "自動で保存されるクイックメモ。",
-            agentsSummary: "Claude Code、Codex、Antigravityの使用量、上限、コスト。"
+            agentsSummary: "Claude Code、Codex、OpenCode、Antigravityの使用量、上限、コスト。"
         )
         case .ko: return NotchEditorStrings(
             layout: "레이아웃",
@@ -786,7 +786,7 @@ extension FeatureStrings {
             cameraSummary: "통화 전에 모습을 확인하는 거울.",
             downloadsSummary: "진행 중이거나 방금 끝난 다운로드.",
             scratchpadSummary: "저절로 저장되는 빠른 메모.",
-            agentsSummary: "Claude Code, Codex, Antigravity의 사용량, 한도, 비용."
+            agentsSummary: "Claude Code, Codex, OpenCode, Antigravity의 사용량, 한도, 비용."
         )
         case .zhHans: return NotchEditorStrings(
             layout: "布局",
@@ -849,7 +849,7 @@ extension FeatureStrings {
             cameraSummary: "通话前照一照的镜子。",
             downloadsSummary: "进行中和刚完成的下载。",
             scratchpadSummary: "自动保存的快速笔记。",
-            agentsSummary: "Claude Code、Codex 和 Antigravity 的用量、限额和费用。"
+            agentsSummary: "Claude Code、Codex、OpenCode 和 Antigravity 的用量、限额和费用。"
         )
         case .zhTW: return NotchEditorStrings(
             layout: "佈局",
@@ -912,7 +912,7 @@ extension FeatureStrings {
             cameraSummary: "通話前照一照的鏡子。",
             downloadsSummary: "進行中和剛完成的下載。",
             scratchpadSummary: "自動儲存的快速筆記。",
-            agentsSummary: "Claude Code、Codex 和 Antigravity 的用量、限額和費用。"
+            agentsSummary: "Claude Code、Codex、OpenCode 和 Antigravity 的用量、限額和費用。"
         )
         case .zhHK: return NotchEditorStrings(
             layout: "佈局",
@@ -975,7 +975,7 @@ extension FeatureStrings {
             cameraSummary: "通話前照一照的鏡子。",
             downloadsSummary: "進行中和剛完成的下載。",
             scratchpadSummary: "自動儲存的快速筆記。",
-            agentsSummary: "Claude Code、Codex 和 Antigravity 的用量、限額和費用。"
+            agentsSummary: "Claude Code、Codex、OpenCode 和 Antigravity 的用量、限額和費用。"
         )
         case .uk: return NotchEditorStrings(
             layout: "Розкладка",
@@ -1038,7 +1038,7 @@ extension FeatureStrings {
             cameraSummary: "Дзеркало, щоб перевірити себе перед викликом.",
             downloadsSummary: "Завантаження, що тривають або щойно завершилися.",
             scratchpadSummary: "Швидкі нотатки, що зберігаються автоматично.",
-            agentsSummary: "Використання Claude Code, Codex і Antigravity, ліміти й витрати."
+            agentsSummary: "Використання Claude Code, Codex, OpenCode і Antigravity, ліміти й витрати."
         )
         }
     }
