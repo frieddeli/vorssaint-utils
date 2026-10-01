@@ -116,6 +116,7 @@ enum NotchPresentationRefreshContract {
         var revealFromHidden = false
         var outlineEnabled = false
         var outlineColor = NSColor.white
+        var transitions: [NotchContentTransition] = []
         func setOutline(enabled: Bool, color: NSColor) {
             outlineEnabled = enabled
             outlineColor = color
@@ -123,6 +124,7 @@ enum NotchPresentationRefreshContract {
         func present(size: CGSize, geometry: NotchGeometry, animated: Bool,
                      transitionContent: NotchContentTransition, quickAccess: NotchQuickAccessConfiguration?,
                      revealFromHidden: Bool, usesGlass: Bool) {
+            transitions.append(transitionContent)
             departsContent = transitionContent == .depart
             self.usesGlass = usesGlass
             self.revealFromHidden = revealFromHidden
@@ -186,6 +188,7 @@ enum NotchPresentationRefreshContract {
         var panel: Panel? { windowHost?.panel }
         var geometry = NotchGeometry(screen: CGRect(x: 0, y: 0, width: 1440, height: 900),
                                      safeAreaTop: 32, cameraWidth: 210)
+        var headerTitleWidth: CGFloat = 0
         var expandedGeometry: NotchGeometry { geometry }
         var compactActivityGeometry: NotchGeometry { geometry.compactTimerGeometry(showsDownloads: false) }
         var surfaceSize: CGSize {
@@ -252,6 +255,13 @@ enum NotchPresentationRefreshContract {
         toolbar.showingSections = true
         suite.expect(toolbar.expandedGeometry.headerCameraGap == 210,
                      "leaving capture editing restores the compact header layout")
+        let titled = Service()
+        titled.headerTitleWidth = 108
+        suite.expect(titled.expandedGeometry.headerCameraGap == 0 && titled.expandedGeometry.headerTopInset == 42,
+                     "a page title wider than the camera's side takes the full row below it")
+        titled.headerTitleWidth = 107
+        suite.expect(titled.expandedGeometry.headerCameraGap == 210 && titled.expandedGeometry.headerTopInset == 0,
+                     "a page title that fits keeps its place beside the camera")
         captureControlsChecks(suite)
         let picker = Service()
         picker.expanded = false
@@ -584,6 +594,25 @@ enum NotchPresentationRefreshContract {
         holding.rememberPresentedMusic(playback: NotchPlayback(track: 2), artwork: nil, tint: nil)
         suite.expect(holding.heldMusic?.track == 1 && holding.presentedMusic?.track == 2,
                      "while the strip stays on screen, a new reading keeps the song it shows")
+        // A song held as it ended is released by the refresh that follows,
+        // even one that hides the island before it reads the strip again.
+        UserDefaults.standard.hides = true
+        let hiding = Service()
+        hiding.expanded = false
+        hiding.presentedMusic = NotchCompactMusicSnapshot(track: 1)
+        hiding.heldMusic = NotchCompactMusicSnapshot(track: 1)
+        hiding.refreshPresentation(animated: false)
+        UserDefaults.standard.hides = false
+        let unmeasured = Service()
+        unmeasured.expanded = false
+        unmeasured.geometry = NotchGeometry(screen: CGRect(x: -1440, y: 900, width: 1440, height: 900),
+                                            safeAreaTop: 0, cameraWidth: 0)
+        unmeasured.presentedMusic = NotchCompactMusicSnapshot(track: 1)
+        unmeasured.heldMusic = NotchCompactMusicSnapshot(track: 1)
+        unmeasured.refreshPresentation(animated: false)
+        suite.expect([hiding, unmeasured].allSatisfy { $0.heldMusic == nil && $0.presentedMusic == nil
+                                                       && $0.panel?.isVisible == false },
+                     "hiding the island ends a hold, so the strip comes back with the live song")
 
         let replacement = Service()
         replacement.expanded = false
@@ -592,6 +621,18 @@ enum NotchPresentationRefreshContract {
         replacement.compactActivityIsVisible = true
         suite.expect(replacement.compactMusicTransition(.none, animated: true) == .replace,
                      "a compact timer replaces the disappearing music with a fade")
+
+        // The picker changes the strip inside its surface, so the song chosen
+        // away is no departure for the host to fade through every choice.
+        let chosen = Service()
+        chosen.expanded = false
+        chosen.showsCompactActivityPicker = true
+        chosen.compactActivity = .music
+        chosen.compactActivityIsVisible = true
+        chosen.presentedMusic = NotchCompactMusicSnapshot(track: 2)
+        chosen.switchCompactSelection { chosen.compactActivity = .timer }
+        suite.expect(chosen.windowHost?.transitions == [NotchContentTransition.none],
+                     "choosing another activity over a song changes the strip in place, without the host's fade")
 
         let reduced = Service()
         reduced.expanded = false
