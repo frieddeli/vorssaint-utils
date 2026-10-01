@@ -311,7 +311,8 @@ final class AgentUsageStore {
     var showsClaudeTurn: Bool { turns.values.contains { $0.provider == .claude } }
 
     /// What is kept between launches: every counter the logs gave, and none
-    /// of their text.
+    /// of their text. OpenCode's database is read again at each launch, so
+    /// nothing it gave is kept.
     struct Saved: Equatable {
         struct Record: Equatable {
             let key: String
@@ -331,13 +332,14 @@ final class AgentUsageStore {
     var saved: Saved {
         var keys = [String](repeating: "", count: records.count)
         for (key, position) in index { keys[position] = key }
-        let kept = records.indices.map {
+        let kept = records.indices.filter { records[$0].provider != .opencode }.map {
             Saved.Record(key: keys[$0], record: records[$0], billable: billables[$0], sources: sources[$0])
         }
         return Saved(records: kept,
                      limits: limits.values.sorted { $0.provider.rawValue < $1.provider.rawValue },
                      codexPlan: codexPlan, codexPlanObserved: codexPlanObserved,
-                     turns: turns.values.sorted { $0.id < $1.id }, waiting: waiting.values.sorted { $0.id < $1.id })
+                     turns: turns.values.filter { $0.provider != .opencode }.sorted { $0.id < $1.id },
+                     waiting: waiting.values.filter { $0.provider != .opencode }.sorted { $0.id < $1.id })
     }
 
     convenience init(saved: Saved) {

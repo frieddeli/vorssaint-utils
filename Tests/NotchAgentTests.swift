@@ -772,6 +772,7 @@ enum NotchAgentTests {
         openCodeRevert(suite)
         openCodeOpenReplies(suite)
         openCodeStoppedLoops(suite, now: now)
+        openCodeQuietSessions(suite, now: now)
     }
 
     private static func openCodeReasoningTokens(_ suite: TestSuite, now: Date) {
@@ -1208,7 +1209,7 @@ enum NotchAgentTests {
     // MARK: OpenCode database helpers
 
     /// A database laid out like OpenCode's, in a folder of its own.
-    private static func openCodeDatabase(_ sql: String) -> (folder: URL, path: String)? {
+    static func openCodeDatabase(_ sql: String) -> (folder: URL, path: String)? {
         let folder = FileManager.default.temporaryDirectory.appending(path: "vorss-opencode-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let path = folder.appending(path: "opencode.db").path
@@ -1222,7 +1223,7 @@ enum NotchAgentTests {
     }
 
     @discardableResult
-    private static func openCodeExec(_ path: String, _ sql: String) -> Bool {
+    static func openCodeExec(_ path: String, _ sql: String) -> Bool {
         var db: OpaquePointer?
         guard sqlite3_open(path, &db) == SQLITE_OK else { return false }
         defer { sqlite3_close(db) }
@@ -1645,6 +1646,51 @@ enum NotchAgentTests {
                         && all.filter { if case .turnEnded = $0 { return true }; return false }
                             == [.turnEnded(at(1_790_092_410), completed: true, duration: 1010)],
                      "a prompt sent while a long command runs joins the task, which ends once")
+    }
+
+    // MARK: OpenCode quiet sessions
+
+    private static func openCodeQuietSessions(_ suite: TestSuite, now: Date) {
+        func at(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: seconds) }
+        var state = AgentLogState()
+        let store = AgentUsageStore()
+        store.reportsTransitions = true
+        var events: [AgentUsageEvent] = []
+        func feed(_ json: String, at seconds: TimeInterval) -> [AgentLogEntry] {
+            let entries = AgentLogParser.parseOpenCode(line(json), state: &state, now: now)
+            events += store.apply(entries, file: "db#\(state.session)", provider: .opencode, tracksTurns: true,
+                                  modified: now, now: at(seconds))
+            return entries
+        }
+        _ = feed(#"{"id":"u1","session_id":"s_d","time_created":1790092000,"directory":"/code/app","role":"user"}"#, at: 1_790_092_000)
+        _ = feed(#"{"id":"a1","parentID":"u1","session_id":"s_d","time_created":1790092001,"directory":"/code/app","role":"assistant","tokens":{"input":5},"finish":"stop","time":{"completed":1790092005000}}"#, at: 1_790_092_005)
+        _ = feed(#"{"id":"w1","session_id":"s_w","time_created":1790092010,"role":"user"}"#, at: 1_790_092_010)
+        _ = feed(#"{"id":"wa","parentID":"w1","session_id":"s_w","time_created":1790092011,"role":"assistant","tokens":{"input":5},"time":{"created":1790092011000}}"#, at: 1_790_092_011)
+        // Another session starts well after both went quiet.
+        _ = feed(#"{"id":"n1","session_id":"s_n","time_created":1790093000,"role":"user"}"#, at: 1_790_093_000)
+        suite.expect(state.openCodeSessions["s_d"] == nil && state.openCodeSessions["s_w"] != nil
+                        && state.openCodeSessions["s_n"] != nil,
+                     "a quiet session is let go as another one starts, unless a reply is still being written")
+        let prompt = feed(#"{"id":"u2","session_id":"s_d","time_created":1790093100,"directory":"/code/app","role":"user"}"#, at: 1_790_093_100)
+        let reply = feed(#"{"id":"a2","parentID":"u2","session_id":"s_d","time_created":1790093101,"directory":"/code/app","role":"assistant","model_id":"stealth/ox-alpha","cost":0.01,"tokens":{"input":100,"output":10},"finish":"stop","time":{"completed":1790093110000}}"#, at: 1_790_093_110)
+        suite.expect(prompt == [.turnBegan(at(1_790_093_100))]
+                        && reply.contains(.turnEnded(at(1_790_093_110), completed: true, duration: 10))
+                        && events.count == 2
+                        && events.last == AgentUsageEvent.finished(provider: .opencode, duration: 10, cost: 0.01,
+                                                                   tokens: 110, project: "app")
+                        && store.records.filter { $0.session == "s_d" }.count == 2,
+                     "a later prompt in a session let go opens its own turn, which counts only its own reply")
+
+        // Sessions one after another keep only the one still going.
+        var many = AgentLogState()
+        for index in 0..<200 {
+            let start = 1_790_100_000 + index * 700
+            _ = AgentLogParser.parseOpenCode(line(#"{"id":"u","session_id":"s\#(index)","time_created":\#(start),"role":"user"}"#),
+                                             state: &many, now: now)
+            _ = AgentLogParser.parseOpenCode(line(#"{"id":"a","parentID":"u","session_id":"s\#(index)","time_created":\#(start + 1),"role":"assistant","tokens":{"input":5},"finish":"stop","time":{"completed":\#((start + 5) * 1000)}}"#),
+                                             state: &many, now: now)
+        }
+        suite.expect(many.openCodeSessions.count == 1, "sessions that went quiet one after another are not kept")
     }
 
     private static func timestamps(_ suite: TestSuite) {

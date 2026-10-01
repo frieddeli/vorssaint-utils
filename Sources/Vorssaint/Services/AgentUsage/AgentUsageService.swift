@@ -4,13 +4,14 @@
 import Combine
 import Foundation
 
-/// Reads Claude Code and Codex usage from their local session logs while the
-/// AI section is on, along with the plan limits the Claude app saves. The
-/// files are read where they are, incrementally, and nothing is copied or
-/// sent: only counters are kept, in memory and in the app's private folder
-/// so the next launch reads only what the agents wrote meanwhile. The one
-/// request it makes fetches the public price list, when the person keeps
-/// prices up to date.
+/// Reads Claude Code and Codex usage from their local session logs, and
+/// OpenCode usage from its database, while the AI section is on, along with
+/// the plan limits the Claude app saves. The files are read where they are,
+/// incrementally, and nothing is copied or sent: only counters are kept, in
+/// memory and in the app's private folder so the next launch reads only what
+/// the agents wrote meanwhile. OpenCode's stay in memory only, and its
+/// database is read again at each launch. The one request it makes fetches
+/// the public price list, when the person keeps prices up to date.
 ///
 /// Reading happens on a private queue; the main thread and that queue hand
 /// work to each other asynchronously, except that a stop waits for progress
@@ -284,14 +285,19 @@ final class AgentUsageService: ObservableObject {
         guard mark != savedMark else { return }
         // A log that started over while running still counts what its old
         // contents gave. Left out, the next launch reads it as rewritten.
-        let contents = AgentUsageArchive.Contents(providers: enabled, store: store.saved,
-                                                  cursors: cursors.values.filter { !$0.restarted }.map(\.saved))
+        // Nothing from OpenCode's database is saved. Its open replies and
+        // sessions live only in memory, so each launch reads it again.
+        let kept = cursors.values.filter { !$0.restarted && $0.provider != .opencode }
+        let contents = AgentUsageArchive.Contents(providers: enabled, store: store.saved, cursors: kept.map(\.saved))
         if AgentUsageArchive.save(contents) { savedMark = mark }
     }
 
-    /// Changes whenever a log is read further, replaced or let go.
+    /// Changes whenever a log is read further, replaced or let go. OpenCode,
+    /// which is never saved, leaves it alone.
     private var progressMark: Int {
-        cursors.values.reduce(store.records.count) { mark, cursor in
+        let records = store.records.reduce(0) { $1.provider == .opencode ? $0 : $0 + 1 }
+        return cursors.values.reduce(records) { mark, cursor in
+            guard cursor.provider != .opencode else { return mark }
             var hasher = Hasher()
             hasher.combine(cursor.path)
             hasher.combine(cursor.offset)

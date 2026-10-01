@@ -23,6 +23,16 @@ enum AgentOpenCodeReader {
     /// A reply that has not changed for this long is not being written any more.
     static let abandoned: TimeInterval = 86_400
 
+    /// The values the parser reads from a message, under the names it reads
+    /// them by. The query takes out only these, so prompts, replies, the
+    /// summaries OpenCode saves on prompts and error text never leave the
+    /// database. Of an error, only whether there is one is read.
+    private static let values: [(name: String, path: String)] = [
+        ("role", "$.role"), ("parentID", "$.parentID"), ("modelID", "$.modelID"), ("model_id", "$.model_id"),
+        ("model", "$.model"), ("tokens", "$.tokens"), ("cost", "$.cost"), ("finish", "$.finish"),
+        ("time", "$.time"), ("path", "$.path"),
+    ]
+
     /// When the database or its write-ahead log last changed; nil when there
     /// is no database.
     static func modified(_ path: String) -> Date? {
@@ -39,7 +49,7 @@ enum AgentOpenCodeReader {
 
     /// Reads the messages saved since the last read, or since `horizon` on a
     /// first read, and the replies still being written that changed since.
-    /// Calls `line` with a JSON payload for each.
+    /// Calls `line` with a small JSON payload of the values read for each.
     ///
     /// OpenCode indexes messages by session only, so a filter on their times
     /// would walk the whole table. SQLite stores rows in the order they were
@@ -62,10 +72,11 @@ enum AgentOpenCodeReader {
         cursor.modified = modified(cursor.path) ?? date(info.st_mtimespec)
 
         var db: OpaquePointer?
+        // SQLite hands back a connection to close even when opening fails.
+        defer { sqlite3_close(db) }
         guard sqlite3_open_v2(cursor.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else {
             return
         }
-        defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 2000)
 
         // Reverting a session deletes its newest messages, and SQLite gives
@@ -104,9 +115,14 @@ enum AgentOpenCodeReader {
                 AND \(field("m.data", "$.time.completed")) IS NULL, 0)
             """
         let parentCol = hasParentID ? "s.parent_id" : "NULL"
+        // One pass over each message's JSON hands over the values the parser
+        // reads. SQLite keeps that parse for the checks above in the same row.
+        let paths = values.map { "'\($0.path)'" }.joined(separator: ", ")
         let select = """
         SELECT m.rowid, m.id, m.session_id, m.time_created, m.time_updated, length(m.data), s.directory,
-            \(parentCol), m.data, \(toolCalls), \(autoCompaction), \(writing)
+            \(parentCol), CASE WHEN json_valid(m.data) THEN json_extract(m.data, \(paths)) END,
+            \(toolCalls), \(autoCompaction), \(writing),
+            CASE WHEN json_valid(m.data) THEN json_type(m.data, '$.error') END
         FROM message m
         JOIN session s ON m.session_id = s.id
         """
@@ -163,7 +179,7 @@ enum AgentOpenCodeReader {
     private static func handOver(_ stmt: OpaquePointer?, cursor: AgentLogCursor, now: Date, line: (Data) -> Void) {
         // A later version could leave any of these empty; such a row is
         // skipped rather than read as if it held a value.
-        guard let id = text(stmt, 1), let sessionID = text(stmt, 2), let dataStr = text(stmt, 8),
+        guard let id = text(stmt, 1), let sessionID = text(stmt, 2), let extracted = text(stmt, 8),
               sqlite3_column_type(stmt, 3) != SQLITE_NULL else { return }
         let created = sqlite3_column_int64(stmt, 3)
         let updated = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? created : sqlite3_column_int64(stmt, 4)
@@ -173,9 +189,10 @@ enum AgentOpenCodeReader {
             cursor.openCode.open[id] = nil
         }
 
-        guard var json = (try? JSONSerialization.jsonObject(with: Data(dataStr.utf8))) as? [String: Any] else {
-            return
-        }
+        guard let found = (try? JSONSerialization.jsonObject(with: Data(extracted.utf8))) as? [Any],
+              found.count == values.count else { return }
+        var json: [String: Any] = [:]
+        for (value, read) in zip(values, found) where !(read is NSNull) { json[value.name] = read }
         json["id"] = id
         json["session_id"] = sessionID
         json["parent_session_id"] = text(stmt, 7) ?? ""
@@ -184,6 +201,7 @@ enum AgentOpenCodeReader {
         json["time_updated"] = updated
         if sqlite3_column_int64(stmt, 9) != 0 { json["tool_calls"] = true }
         if sqlite3_column_int64(stmt, 10) != 0 { json["auto_compaction"] = true }
+        if let error = text(stmt, 12), error != "null" { json["error"] = true }
 
         if let mergedData = try? JSONSerialization.data(withJSONObject: json) {
             line(mergedData)

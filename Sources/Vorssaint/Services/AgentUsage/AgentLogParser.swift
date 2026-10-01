@@ -334,6 +334,15 @@ enum AgentLogParser {
 
         let timeCreated = (json["time"] as? [String: Any])?["created"] ?? json["time_created"]
         let date = seconds(timeCreated) ?? now
+        // A session quiet this long with no reply being written starts its
+        // next prompt as a task of its own, so what it kept to tell its rows
+        // apart can go. Sessions are looked over only as a new one appears.
+        if state.openCodeSessions[sessionID] == nil {
+            state.openCodeSessions = state.openCodeSessions.filter { _, kept in
+                !kept.writingReplyID.isEmpty
+                    || date.timeIntervalSince(kept.lastActivity ?? date) < NotchAgentSupport.idleTurn
+            }
+        }
         let lastActivity = sessionState.lastActivity
         sessionState.lastActivity = max(lastActivity ?? date, date)
 
