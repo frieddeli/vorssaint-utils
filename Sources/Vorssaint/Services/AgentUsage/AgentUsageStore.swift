@@ -323,7 +323,9 @@ final class AgentLogCursor {
     var state = AgentLogState()
     var modified = Date.distantPast
 
-    init(path: String, provider: AgentProvider, roots: [AgentLogRoot] = AgentLogRoot.all()) {
+    /// `roots` are the folders being read; only an Antigravity log needs
+    /// them, to find its conversation, and resolves them itself without.
+    init(path: String, provider: AgentProvider, roots: [AgentLogRoot]? = nil) {
         self.path = path
         self.provider = provider
         let name = (path as NSString).lastPathComponent
@@ -335,9 +337,9 @@ final class AgentLogCursor {
         state.session = session
     }
 
-    static func session(of path: String, provider: AgentProvider, roots: [AgentLogRoot] = AgentLogRoot.all()) -> String {
+    static func session(of path: String, provider: AgentProvider, roots: [AgentLogRoot]? = nil) -> String {
         guard provider == .antigravity else { return "" }
-        if let root = roots.first(where: { $0.provider == .antigravity && path.hasPrefix($0.url.path + "/") }) {
+        if let root = (roots ?? AgentLogRoot.all()).first(where: { $0.provider == .antigravity && path.hasPrefix($0.url.path + "/") }) {
             let relative = String(path.dropFirst(root.url.path.count + 1))
             if let first = relative.split(separator: "/").first, !first.isEmpty {
                 return String(first)

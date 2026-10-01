@@ -212,6 +212,8 @@ final class AgentUsageService: ObservableObject {
             // Prices first, so the first read is already priced.
             loadPrices()
             let roots = AgentLogRoot.all(home: home).filter { providers.contains($0.provider) }
+            // Cursors find an Antigravity conversation relative to its root.
+            watchedRoots = roots.filter(\.exists)
             for file in AgentLogReader.discover(roots, since: Date().addingTimeInterval(-Self.horizon)) {
                 // A stop while reading leaves the rest for the next start.
                 guard !cancellation.isCancelled else { return }
@@ -295,7 +297,7 @@ final class AgentUsageService: ObservableObject {
             cursors[path] = nil
             return store.forget(file: path)
         }
-        let cursor = cursors[path] ?? AgentLogCursor(path: path, provider: provider)
+        let cursor = cursors[path] ?? AgentLogCursor(path: path, provider: provider, roots: watchedRoots)
         cursors[path] = cursor
         var changed = false
         let now = Date()

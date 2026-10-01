@@ -1,14 +1,13 @@
 {
   "schema": 1,
-  "updated": "2026-09-28",
+  "updated": "2026-09-22",
   "sources": [
     "https://platform.claude.com/docs/en/about-claude/pricing",
     "https://platform.claude.com/docs/en/about-claude/model-deprecations",
     "https://www.anthropic.com/glasswing",
     "https://developers.openai.com/api/docs/pricing",
     "https://developers.openai.com/api/docs/models",
-    "https://developers.openai.com/codex/models",
-    "https://ai.google.dev/pricing"
+    "https://developers.openai.com/codex/models"
   ],
   "notes": [
     "gpt-5.6-sol and gpt-daybreak-blue-latest carry a promotional price announced through at least 2026-11-21; check them again after that date.",
@@ -56,16 +55,6 @@
   },
   "codex": {
     "models": [
-      { "id": "gemini-3.8-flash-high", "input": 0.75, "output": 3.75, "cacheRead": 0.075 },
-      { "id": "gemini-3-8-flash-high", "input": 0.75, "output": 3.75, "cacheRead": 0.075 },
-      { "id": "gemini-3.8-flash", "input": 0.75, "output": 3.75, "cacheRead": 0.075 },
-      { "id": "gemini-3-8-flash", "input": 0.75, "output": 3.75, "cacheRead": 0.075 },
-      { "id": "gemini-2.5-pro", "input": 1.25, "output": 10.0, "cacheRead": 0.125,
-        "longContext": { "above": 200000, "inputMultiplier": 2, "outputMultiplier": 1.5 } },
-      { "id": "gemini-2-5-pro", "input": 1.25, "output": 10.0, "cacheRead": 0.125,
-        "longContext": { "above": 200000, "inputMultiplier": 2, "outputMultiplier": 1.5 } },
-      { "id": "gemini-2.5-flash", "input": 0.3, "output": 2.5, "cacheRead": 0.03 },
-      { "id": "gemini-2-5-flash", "input": 0.3, "output": 2.5, "cacheRead": 0.03 },
       { "id": "gpt-6-astra", "input": 10, "output": 50, "cacheRead": 1, "cacheWrite": 12.5, "fastMultiplier": 2,
         "longContext": { "above": 272000, "inputMultiplier": 2, "outputMultiplier": 1.5 } },
       { "id": "gpt-6-sol", "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5, "fastMultiplier": 2,

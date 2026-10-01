@@ -350,14 +350,6 @@ enum AgentMarks {
     }
 
     private static func lookUp(_ provider: AgentProvider) -> Mark? {
-        if provider == .antigravity {
-            if let url = Bundle.main.url(forResource: "antigravity-symbol", withExtension: "svg", subdirectory: "Images") ??
-                         Bundle.main.url(forResource: "antigravity-symbol", withExtension: "svg"),
-               let image = NSImage(contentsOf: url) {
-                image.isTemplate = true
-                return .template(image)
-            }
-        }
         for identifier in provider.appIdentifiers {
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) else { continue }
             if let bundle = Bundle(url: url) {
@@ -380,26 +372,21 @@ private extension AgentProvider {
         switch self {
         case .claude: return [AgentClaudeAppUsage.bundleIdentifier]
         case .codex: return AgentCodexServer.appIdentifiers
-        case .antigravity: return ["com.google.antigravity", "com.google.antigravity.ide"]
+        case .antigravity: return ["com.google.antigravity"]
         }
     }
 
     /// The menu bar images keep a margin; the spark's thin rays need more
     /// of the box than the knot to look the same size.
-    var markScale: CGFloat {
-        switch self {
-        case .claude: return 1.45
-        case .antigravity: return 1.15
-        case .codex: return 1.2
-        }
-    }
+    var markScale: CGFloat { self == .claude ? 1.45 : 1.2 }
 
     /// What those apps name the mark they show in the menu bar.
     var menuBarImageNames: [String] {
         switch self {
         case .claude: return ["TrayIconTemplate"]
         case .codex: return ["chatgptTemplate"]
-        case .antigravity: return ["AntigravityTemplate", "AppIcon"]
+        // No menu bar image is known: its app icon shows instead.
+        case .antigravity: return []
         }
     }
 }

@@ -30,6 +30,9 @@ struct AgentLogState: Equatable {
     var lastTotal: AgentTokens?
     /// Codex runs the thread on the fast tier, which bills at a premium.
     var fast = false
+    /// Antigravity named the workspace in the person's message, which
+    /// outranks the folder a command runs in.
+    var namedWorkspace = false
 }
 
 enum AgentLogParser {
@@ -278,29 +281,31 @@ enum AgentLogParser {
     // MARK: Antigravity
 
     static func parseAntigravity(_ line: Data, state: inout AgentLogState, now: Date) -> [AgentLogEntry] {
-        guard contains(line, #""type":""#) else { return [] }
+        let response = contains(line, #""type":"PLANNER_RESPONSE""#)
+        guard response || contains(line, #""type":"USER_INPUT""#) else {
+            // Other steps carry tool output such as file contents and command
+            // results; while a turn is open they only say that work goes on.
+            return state.turnOpen && contains(line, #""type":""#) ? [.turnActive(nil)] : []
+        }
         guard let json = object(line), let type = json["type"] as? String else { return [] }
         let date = timestamp(json["created_at"]) ?? now
-        let status = json["status"] as? String
-        let step = json["step_index"] as? Int ?? 0
 
         switch type {
         case "USER_INPUT":
             var entries: [AgentLogEntry] = []
+            // The previous turn never wrote its final response, as after
+            // stopping the agent: it ends without finishing.
             if state.turnOpen {
-                entries.append(.turnEnded(date, completed: true, duration: nil))
+                entries.append(.turnEnded(date, completed: false, duration: nil))
             }
             state.turnOpen = true
             if let content = json["content"] as? String {
-                if let modelMatch = extractAntigravityModel(content) {
-                    state.model = modelMatch
+                if let model = antigravityModel(content) { state.model = model }
+                if let workspace = antigravityWorkspace(content) {
+                    state.project = workspace
+                    state.namedWorkspace = true
                 }
-                if state.project.isEmpty, let projectMatch = extractAntigravityProject(content) {
-                    state.project = projectMatch
-                }
-                if state.session.isEmpty, let sessionMatch = extractAntigravitySession(content) {
-                    state.session = sessionMatch
-                }
+                if state.session.isEmpty, let session = antigravitySession(content) { state.session = session }
             }
             entries.append(.turnBegan(date))
             return entries
@@ -310,114 +315,78 @@ enum AgentLogParser {
                 state.model = native(model)
             }
             let toolCalls = json["tool_calls"] as? [[String: Any]] ?? []
-            for tool in toolCalls {
-                if let args = tool["args"] as? [String: Any] {
-                    if let cwd = args["Cwd"] as? String, !cwd.isEmpty {
-                        state.project = projectName(cwd.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
-                    } else if let path = args["AbsolutePath"] as? String, !path.isEmpty {
-                        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                        state.project = projectName((cleanPath as NSString).deletingLastPathComponent)
-                    }
+            // A command's working folder stands in only until the person's
+            // message names the workspace; a file's folder never does.
+            if !state.namedWorkspace {
+                for tool in toolCalls {
+                    guard let cwd = (tool["args"] as? [String: Any])?["Cwd"] as? String else { continue }
+                    let folder = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    if !folder.isEmpty { state.project = projectName(folder) }
                 }
             }
 
             let billable = AgentBillable()
             let priced = AgentPricing.cost(billable, model: state.model)
-            let key = "antigravity:\(state.session):\(step)"
+            let step = json["step_index"] as? Int ?? 0
             let record = AgentUsageRecord(
                 provider: .antigravity, date: date, model: state.model, project: state.project,
                 session: state.session, tokens: AgentTokens(), cost: priced.cost, savings: priced.savings
             )
-            let usageEntry = AgentLogEntry.usage(key: key, record: record, billable: billable)
             var entries: [AgentLogEntry] = []
             if !state.turnOpen {
                 state.turnOpen = true
                 entries.append(.turnBegan(date))
             }
-            entries.append(usageEntry)
+            entries.append(.usage(key: "antigravity:\(state.session):\(step)", record: record, billable: billable))
 
-            let hasTools = !toolCalls.isEmpty
-            if !hasTools && (status == "DONE" || status == nil) {
-                state.turnOpen = false
-                entries.append(.turnEnded(date, completed: true, duration: nil))
-                return entries
-            } else if status == "ERROR" {
+            let status = json["status"] as? String
+            // A stopped response is still saved as DONE; the next message
+            // ends that turn. Only a failure ends it here.
+            if status == "ERROR" {
                 state.turnOpen = false
                 entries.append(.turnEnded(date, completed: false, duration: nil))
-                return entries
+            } else if toolCalls.isEmpty && (status == "DONE" || status == nil) {
+                state.turnOpen = false
+                entries.append(.turnEnded(date, completed: true, duration: nil))
             } else {
                 entries.append(.turnActive(date))
-                return entries
             }
-
-        case "GENERIC":
-            if let content = json["content"] as? String {
-                if let modelMatch = extractAntigravityModel(content) {
-                    state.model = modelMatch
-                }
-                if state.turnOpen {
-                    return [.turnActive(date)]
-                }
-            } else if state.turnOpen {
-                return [.turnActive(date)]
-            }
-            return []
+            return entries
 
         default:
             return []
         }
     }
 
-    private static func extractAntigravityModel(_ content: String) -> String? {
-        if let range = content.range(of: "Model Selection`") {
-            let tail = content[range.upperBound...]
-            if let toRange = tail.range(of: " to ") {
-                let afterTo = tail[toRange.upperBound...]
-                let candidates = [". No need", ".</USER_SETTINGS_CHANGE>", ".\n", "\n"]
-                var endIndex = afterTo.endIndex
-                for candidate in candidates {
-                    if let cRange = afterTo.range(of: candidate), cRange.lowerBound < endIndex {
-                        endIndex = cRange.lowerBound
-                    }
-                }
-                let model = String(afterTo[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !model.isEmpty {
-                    return model
-                }
-            }
+    /// The model the person picked, from the settings change Antigravity
+    /// adds to their message.
+    private static func antigravityModel(_ content: String) -> String? {
+        guard let change = content.range(of: "<USER_SETTINGS_CHANGE>"),
+              let range = content[change.upperBound...].range(of: "Model Selection`") else { return nil }
+        let tail = content[range.upperBound...]
+        guard let toRange = tail.range(of: " to ") else { return nil }
+        let afterTo = tail[toRange.upperBound...]
+        var endIndex = afterTo.endIndex
+        for candidate in [". No need", ".</USER_SETTINGS_CHANGE>", "</USER_SETTINGS_CHANGE>", ".\n", "\n"] {
+            if let found = afterTo.range(of: candidate), found.lowerBound < endIndex { endIndex = found.lowerBound }
         }
-        if let range = content.range(of: "\"modelName\":\"") {
-            let tail = content[range.upperBound...]
-            if let quote = tail.firstIndex(of: "\"") {
-                let name = String(tail[..<quote]).trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty { return name }
-            }
-        }
-        return nil
+        let model = String(afterTo[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.isEmpty ? nil : model
     }
 
-    private static func extractAntigravityProject(_ content: String) -> String? {
-        if let range = content.range(of: "[URI] -> [CorpusName]:\n") {
-            let tail = content[range.upperBound...]
-            if let lineEnd = tail.firstIndex(of: "\n") {
-                let line = String(tail[..<lineEnd])
-                if let arrow = line.range(of: " -> ") {
-                    return projectName(String(line[..<arrow.lowerBound]))
-                }
-            }
-        }
-        return nil
+    private static func antigravityWorkspace(_ content: String) -> String? {
+        guard let range = content.range(of: "[URI] -> [CorpusName]:\n") else { return nil }
+        let tail = content[range.upperBound...]
+        guard let lineEnd = tail.firstIndex(of: "\n"),
+              let arrow = tail[..<lineEnd].range(of: " -> ") else { return nil }
+        let name = projectName(String(tail[..<arrow.lowerBound]))
+        return name.isEmpty ? nil : name
     }
 
-    private static func extractAntigravitySession(_ content: String) -> String? {
-        if let range = content.range(of: "Conversation ID: ") {
-            let tail = content[range.upperBound...]
-            let session = tail.prefix(while: { $0.isLetter || $0.isNumber || $0 == "-" })
-            if !session.isEmpty {
-                return String(session)
-            }
-        }
-        return nil
+    private static func antigravitySession(_ content: String) -> String? {
+        guard let range = content.range(of: "Conversation ID: ") else { return nil }
+        let session = content[range.upperBound...].prefix(while: { $0.isLetter || $0.isNumber || $0 == "-" })
+        return session.isEmpty ? nil : String(session)
     }
 
     /// Input counts include what came from the cache.

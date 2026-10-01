@@ -26,6 +26,7 @@ enum AgentUsageReadTests {
     class Fixture {
         var readerCancellation: Cancellation? = Cancellation()
         var cursors: [String: AgentLogCursor] = [:]
+        var watchedRoots: [AgentLogRoot] = []
         let store = AgentUsageStore()
         var events: [AgentUsageEvent] = []
         func report(_ event: AgentUsageEvent) { events.append(event) }
@@ -68,8 +69,10 @@ enum AgentUsageReadTests {
         for (provider, lines) in cases {
             // A canonical filename, not a Codex side-thread filename.
             let file: URL
+            // Antigravity names the conversation only in its folder, relative to the root being read.
+            let roots = [AgentLogRoot(provider: .antigravity, url: folder.appending(path: "brain", directoryHint: .isDirectory))]
             if provider == .antigravity {
-                let sub = folder.appending(path: "brain/session-1")
+                let sub = folder.appending(path: "brain/conversation-1/.system_generated/logs")
                 try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
                 file = sub.appending(path: "transcript.jsonl")
             } else {
@@ -78,7 +81,7 @@ enum AgentUsageReadTests {
             do { try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file) }
             catch { suite.expect(false, "the streaming fixture writes its log: \(error)"); continue }
 
-            let cursor = AgentLogCursor(path: file.path, provider: provider)
+            let cursor = AgentLogCursor(path: file.path, provider: provider, roots: roots)
             var entries: [AgentLogEntry] = []
             AgentUsageProductionLogReader.readAppended(cursor) { line in
                 switch provider {
@@ -93,6 +96,7 @@ enum AgentUsageReadTests {
                                                  tracksTurns: cursor.tracksTurns, parent: cursor.parent,
                                                  modified: cursor.modified, now: now)
             let host = Host()
+            host.watchedRoots = roots
             host.store.reportsTransitions = true
             var counts: [Int] = []
             AgentLogReader.beforeLine = { counts.append(host.store.records.count) }
@@ -104,6 +108,10 @@ enum AgentUsageReadTests {
                             && host.store.waiting == reference.waiting && host.store.limits == reference.limits
                             && host.store.codexPlan == reference.codexPlan && host.events == expectedEvents,
                          "streaming \(provider.rawValue) preserves duplicate merging, usage, turns, limits, plans and event order")
+            suite.expect(provider != .antigravity || (AgentUsageProductionLogReader.isLog(file.path, in: roots[0])
+                            && !host.store.records.isEmpty
+                            && host.store.records.allSatisfy { $0.session == "conversation-1" && $0.project == "example" }),
+                         "the Antigravity cursor takes the conversation from its folder under the given root")
             suite.expect(!expectedEvents.isEmpty && host.cursors[file.path]?.state == cursor.state,
                          "\(provider.rawValue) finishes the same turn and retains the same parser context")
             suite.expect(!host.read(file.path, provider: provider) && host.events == expectedEvents,
