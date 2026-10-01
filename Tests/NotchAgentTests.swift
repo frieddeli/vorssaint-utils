@@ -763,6 +763,7 @@ enum NotchAgentTests {
         openCodeDatabaseReplacement(suite, now: now)
         openCodeReadWindow(suite, now: now)
         openCodeNullColumns(suite)
+        openCodeValues(suite)
         openCodeDiscovery(suite)
         openCodeEmptyReplies(suite, now: now)
         openCodeFinishes(suite, now: now)
@@ -1307,6 +1308,28 @@ enum NotchAgentTests {
         suite.expect(rows.map { $0["id"] as? String } == ["n_updated", "n_ok"]
                         && rows.allSatisfy { $0["directory"] as? String == "" },
                      "rows missing a value are skipped, an empty folder or update time reads as none")
+    }
+
+    private static func openCodeValues(_ suite: TestSuite) {
+        guard let (folder, path) = openCodeDatabase("""
+        INSERT INTO session VALUES ('s_v', '/code/v', NULL, 1790088000000, 1790088000000);
+        INSERT INTO message VALUES ('v_reply', 's_v', 1790088000000, 1790088000000, '{"role":"assistant","model":{"modelID":"model-v"},"tokens":{"input":3,"cache":{"read":2,"write":1}},"path":{"cwd":"/code/v/app","root":"/code/v"},"error":{"name":"Stopped","data":{"message":"private words"}},"summary":{"body":"private words"}}');
+        INSERT INTO message VALUES ('v_plain', 's_v', 1790088001000, 1790088001000, '{"role":"assistant","error":null}');
+        """) else {
+            suite.expect(false, "values database opens")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var payloads: [String] = []
+        AgentOpenCodeReader.readAppended(AgentLogCursor(path: path, provider: .opencode)) { payloads.append(String(decoding: $0, as: UTF8.self)) }
+        let rows = payloads.compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+        suite.expect(rows.count == 2 && (rows[0]["model"] as? [String: Any])?["modelID"] as? String == "model-v"
+                        && ((rows[0]["tokens"] as? [String: Any])?["cache"] as? [String: Any])?["read"] as? Int == 2
+                        && (rows[0]["path"] as? [String: String]) == ["cwd": "/code/v/app"]
+                        && rows[0]["error"] as? Bool == true && rows[1]["error"] == nil,
+                     "a reply hands over its model, tokens, working folder and whether it failed")
+        suite.expect(!payloads.contains { $0.contains("private words") || $0.contains("\"root\"") },
+                     "no message text and no other path leaves the database")
     }
 
     private static func openCodeDiscovery(_ suite: TestSuite) {

@@ -26,11 +26,12 @@ enum AgentOpenCodeReader {
     /// The values the parser reads from a message, under the names it reads
     /// them by. The query takes out only these, so prompts, replies, the
     /// summaries OpenCode saves on prompts and error text never leave the
-    /// database. Of an error, only whether there is one is read.
+    /// database. Of an error, only whether there is one is read, and of the
+    /// paths a reply records, only the folder it worked in.
     private static let values: [(name: String, path: String)] = [
         ("role", "$.role"), ("parentID", "$.parentID"), ("modelID", "$.modelID"), ("model_id", "$.model_id"),
         ("model", "$.model"), ("tokens", "$.tokens"), ("cost", "$.cost"), ("finish", "$.finish"),
-        ("time", "$.time"), ("path", "$.path"),
+        ("time", "$.time"), ("cwd", "$.path.cwd"),
     ]
 
     /// When the database or its write-ahead log last changed; nil when there
@@ -179,7 +180,7 @@ enum AgentOpenCodeReader {
     private static func handOver(_ stmt: OpaquePointer?, cursor: AgentLogCursor, now: Date, line: (Data) -> Void) {
         // A later version could leave any of these empty; such a row is
         // skipped rather than read as if it held a value.
-        guard let id = text(stmt, 1), let sessionID = text(stmt, 2), let extracted = text(stmt, 8),
+        guard let id = text(stmt, 1), let sessionID = text(stmt, 2),
               sqlite3_column_type(stmt, 3) != SQLITE_NULL else { return }
         let created = sqlite3_column_int64(stmt, 3)
         let updated = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? created : sqlite3_column_int64(stmt, 4)
@@ -189,10 +190,13 @@ enum AgentOpenCodeReader {
             cursor.openCode.open[id] = nil
         }
 
-        guard let found = (try? JSONSerialization.jsonObject(with: Data(extracted.utf8))) as? [Any],
+        // A row whose data cannot be read is let go above, not looked at again.
+        guard let extracted = text(stmt, 8),
+              let found = (try? JSONSerialization.jsonObject(with: Data(extracted.utf8))) as? [Any],
               found.count == values.count else { return }
         var json: [String: Any] = [:]
         for (value, read) in zip(values, found) where !(read is NSNull) { json[value.name] = read }
+        if let cwd = json.removeValue(forKey: "cwd") { json["path"] = ["cwd": cwd] }
         json["id"] = id
         json["session_id"] = sessionID
         json["parent_session_id"] = text(stmt, 7) ?? ""
