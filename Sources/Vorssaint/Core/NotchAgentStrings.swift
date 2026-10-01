@@ -52,6 +52,8 @@ struct NotchAgentStrings {
     let limitsAs: String
     let remaining: String
     let used: String
+    let limitFocus: String
+    let mostUsed: String
     let liveTitle: String
     let liveActivity: String
     let readout: String
@@ -139,6 +141,14 @@ struct NotchAgentStrings {
         case .limit: return readoutLimit
         }
     }
+
+    func limitFocus(_ focus: NotchAgentLimitFocus) -> String {
+        switch focus {
+        case .mostUsed: return mostUsed
+        case .session: return session
+        case .weekly: return weekly
+        }
+    }
 }
 
 extension FeatureStrings {
@@ -213,6 +223,8 @@ extension NotchAgentStrings {
         limitsAs: "Show limits as",
         remaining: "Left",
         used: "Used",
+        limitFocus: "Limit to show",
+        mostUsed: "Most used",
         liveTitle: "While an agent works",
         liveActivity: "Show it in the closed Dynamic Island",
         readout: "Beside the camera",
@@ -306,6 +318,8 @@ extension NotchAgentStrings {
         limitsAs: "Показувати ліміти як",
         remaining: "Залишок",
         used: "Використано",
+        limitFocus: "Який ліміт показувати",
+        mostUsed: "Найбільш використаний",
         liveTitle: "Поки агент працює",
         liveActivity: "Показувати в закритому Dynamic Island",
         readout: "Поруч із камерою",
@@ -399,6 +413,8 @@ extension NotchAgentStrings {
         limitsAs: "Mostrar limites como",
         remaining: "Restante",
         used: "Usado",
+        limitFocus: "Limite exibido",
+        mostUsed: "Mais usado",
         liveTitle: "Enquanto um agente trabalha",
         liveActivity: "Mostrar no Dynamic Island fechado",
         readout: "Ao lado da câmera",
@@ -492,6 +508,8 @@ extension NotchAgentStrings {
         limitsAs: "Mostrar límites como",
         remaining: "Restante",
         used: "Usado",
+        limitFocus: "Límite a mostrar",
+        mostUsed: "El más usado",
         liveTitle: "Mientras un agente trabaja",
         liveActivity: "Mostrarlo en el Dynamic Island cerrado",
         readout: "Junto a la cámara",
@@ -585,6 +603,8 @@ extension NotchAgentStrings {
         limitsAs: "Zobraziť limity ako",
         remaining: "Zostatok",
         used: "Využité",
+        limitFocus: "Zobrazený limit",
+        mostUsed: "Najviac využitý",
         liveTitle: "Kým agent pracuje",
         liveActivity: "Zobraziť v zatvorenom Dynamic Island",
         readout: "Vedľa kamery",
@@ -678,6 +698,8 @@ extension NotchAgentStrings {
         limitsAs: "Limits anzeigen als",
         remaining: "Übrig",
         used: "Genutzt",
+        limitFocus: "Angezeigtes Limit",
+        mostUsed: "Am meisten genutzt",
         liveTitle: "Während ein Agent arbeitet",
         liveActivity: "Im geschlossenen Dynamic Island zeigen",
         readout: "Neben der Kamera",
@@ -771,6 +793,8 @@ extension NotchAgentStrings {
         limitsAs: "Afficher les limites en",
         remaining: "Restant",
         used: "Utilisé",
+        limitFocus: "Limite affichée",
+        mostUsed: "La plus utilisée",
         liveTitle: "Pendant qu’un agent travaille",
         liveActivity: "L’afficher dans le Dynamic Island fermé",
         readout: "À côté de la caméra",
@@ -864,6 +888,8 @@ extension NotchAgentStrings {
         limitsAs: "Mostra i limiti come",
         remaining: "Rimasto",
         used: "Usato",
+        limitFocus: "Limite mostrato",
+        mostUsed: "Il più usato",
         liveTitle: "Mentre un agente lavora",
         liveActivity: "Mostralo nel Dynamic Island chiuso",
         readout: "Accanto alla fotocamera",
@@ -957,6 +983,8 @@ extension NotchAgentStrings {
         limitsAs: "Показывать лимиты",
         remaining: "Остаток",
         used: "Использовано",
+        limitFocus: "Показ лимита",
+        mostUsed: "Наиболее использованный",
         liveTitle: "Пока агент работает",
         liveActivity: "Показывать в закрытом Dynamic Island",
         readout: "Рядом с камерой",
@@ -1050,6 +1078,8 @@ extension NotchAgentStrings {
         limitsAs: "Sınırları göster",
         remaining: "Kalan",
         used: "Kullanılan",
+        limitFocus: "Gösterilen sınır",
+        mostUsed: "En çok kullanılan",
         liveTitle: "Bir ajan çalışırken",
         liveActivity: "Kapalı Dynamic Island’da göster",
         readout: "Kameranın yanında",
@@ -1143,6 +1173,8 @@ extension NotchAgentStrings {
         limitsAs: "上限の表示",
         remaining: "残り",
         used: "使用済み",
+        limitFocus: "表示する上限",
+        mostUsed: "使用率が最大",
         liveTitle: "エージェントの作業中",
         liveActivity: "閉じたDynamic Islandに表示",
         readout: "カメラの横",
@@ -1236,6 +1268,8 @@ extension NotchAgentStrings {
         limitsAs: "한도 표시 방식",
         remaining: "남은 양",
         used: "사용량",
+        limitFocus: "표시할 한도",
+        mostUsed: "가장 많이 사용",
         liveTitle: "에이전트가 작업하는 동안",
         liveActivity: "닫힌 Dynamic Island에 표시",
         readout: "카메라 옆",
@@ -1329,6 +1363,8 @@ extension NotchAgentStrings {
         limitsAs: "额度显示为",
         remaining: "剩余",
         used: "已用",
+        limitFocus: "显示的额度",
+        mostUsed: "用量最高",
         liveTitle: "智能体工作时",
         liveActivity: "在收起的 Dynamic Island 中显示",
         readout: "摄像头旁",
@@ -1422,6 +1458,8 @@ extension NotchAgentStrings {
         limitsAs: "額度顯示為",
         remaining: "剩餘",
         used: "已用",
+        limitFocus: "顯示的額度",
+        mostUsed: "用量最高",
         liveTitle: "代理運作時",
         liveActivity: "在收合的 Dynamic Island 中顯示",
         readout: "相機旁",
@@ -1515,6 +1553,8 @@ extension NotchAgentStrings {
         limitsAs: "額度顯示為",
         remaining: "剩餘",
         used: "已用",
+        limitFocus: "顯示的額度",
+        mostUsed: "用量最高",
         liveTitle: "代理運作時",
         liveActivity: "在收合的 Dynamic Island 中顯示",
         readout: "相機旁",

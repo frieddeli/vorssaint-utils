@@ -246,8 +246,8 @@ private struct NotchAgentLimitsCard: View {
         return parts.joined(separator: " · ")
     }
 
-    /// Without a recent reading from the Claude app, the session still starts
-    /// and ends on the hour of its first request, so the window itself is known.
+    /// Without a recent reading from the Claude app, the session still ends
+    /// five hours after its first request, so the window itself is known.
     @ViewBuilder private var estimate: some View {
         if provider == .claude, let block = snapshot.claudeBlock {
             let length = block.end.timeIntervalSince(block.start)

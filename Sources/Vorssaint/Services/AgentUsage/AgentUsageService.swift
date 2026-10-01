@@ -623,10 +623,8 @@ final class AgentUsageService: ObservableObject {
                 : (try? Data(contentsOf: url)).flatMap(AgentClaudeAppUsage.samples) ?? []
         }
         // Claude Code's own first request can place the session's start.
-        let recent = store.records.filter {
-            $0.provider == .claude && $0.date <= now && now.timeIntervalSince($0.date) < AgentUsageSummary.blockHistory
-        }
-        let start = AgentUsageSummary.currentBlock(recent, now: now)?.start
+        let start = AgentClaudeAppUsage.sessionStart(store.records, samples: claudeAppSamples,
+                                                     organization: claudeOrganization)
         if let limits = AgentClaudeAppUsage.limits(from: claudeAppSamples, now: now, sessionStart: start,
                                                    organization: claudeOrganization) {
             store.setLimits(limits)

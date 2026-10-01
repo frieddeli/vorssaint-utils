@@ -1295,6 +1295,12 @@ enum NotchSupport {
     static let defaultHoverDelay = 0.25
     static let hoverDelayRange = 0.10...1.0
 
+    /// Whether a screen point lies in a top-edge click area, whose top edge
+    /// belongs to it as in the flipped native view.
+    static func screenEdgeArea(_ area: CGRect, contains point: CGPoint) -> Bool {
+        CGRect(origin: .zero, size: area.size).contains(CGPoint(x: point.x - area.minX, y: area.maxY - point.y))
+    }
+
     static func sanitizedHoverDelay(_ value: TimeInterval) -> TimeInterval {
         value.isFinite ? min(hoverDelayRange.upperBound, max(hoverDelayRange.lowerBound, value)) : defaultHoverDelay
     }

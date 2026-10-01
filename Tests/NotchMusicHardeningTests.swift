@@ -551,10 +551,18 @@ enum NotchMusicHardeningTests {
         suite.expect(choose([browser, paused], previous: 10, includeOtherPlayers: true) == browser
                      && choose([browser], includeOtherPlayers: true) == browser,
                      "the opt-in restores automatic playback from other apps")
+        suite.expect(choose([paused, browser], previous: 10, system: 10, includeOtherPlayers: true) == browser,
+                     "a playing browser takes over when the system player still points at paused music")
+        suite.expect(choose([browser], previous: nil, system: 99, includeOtherPlayers: true) == browser,
+                     "a newly registered playing client does not need an existing follow relationship")
+        suite.expect(choose([music, browser], previous: 20, system: 20, includeOtherPlayers: true) == music,
+                     "including other players preserves priority for actively playing music")
         let idleBrowser = source(20, music: false, playing: false)
         suite.expect(NotchPlaybackSource.preferred(in: [music, browser], previousPID: 10, systemPID: 10,
                                                    selection: browser.selection) == browser,
                      "an explicit browser selection overrides simultaneous music playback")
+        suite.expect(choose([paused, idleBrowser], previous: 10, system: 10, includeOtherPlayers: true) == paused,
+                     "an unrelated paused browser cannot replace a music resume control")
         suite.expect(NotchPlaybackSource.preferred(in: [music, idleBrowser], previousPID: 20, systemPID: 10,
                                                    selection: browser.selection) == idleBrowser,
                      "pausing a chosen browser keeps its resume control reachable")
