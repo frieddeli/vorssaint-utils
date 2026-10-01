@@ -606,18 +606,22 @@ enum NotchAgentTests {
         let knownModelPrompt = line(#"{"step_index":1,"type":"USER_INPUT","status":"DONE","created_at":"2026-09-28T00:00:00.000Z","content":"Explain quantum computing"}"#)
         let knownModelReply = line(#"{"step_index":2,"type":"PLANNER_RESPONSE","model":"gemini-2.5-pro","status":"DONE","created_at":"2026-09-28T00:00:05.000Z","content":"Quantum computing uses qubits."}"#)
         _ = feed([knownModelPrompt, knownModelReply], &knownModelState, into: repriceStore, file: "brain/conv-known/transcript.jsonl")
-        let claudePriced = AgentUsageRecord(provider: .claude, date: Date(timeIntervalSince1970: 1_790_553_000),
+        let claudePriced = AgentUsageRecord(provider: .claude, date: Date(timeIntervalSince1970: 1_790_553_605),
                                             model: "claude-opus-5-5", project: "app", session: "c",
                                             tokens: AgentTokens(input: 1000, cacheWrite: 0, cacheRead: 0, output: 100),
                                             cost: 0.5, savings: 0)
 
         let testNow = Date(timeIntervalSince1970: 1_790_553_610)
+        // The records fall on one UTC day, whatever zone the tests run in.
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
         func check(_ label: String) {
             let record = repriceStore.records.first
             let usage = repriceStore.snapshot(plans: [:], providers: [.antigravity], now: testNow,
-                                              calendar: Calendar.autoupdatingCurrent).usage(.today)
+                                              calendar: utc).usage(.today)
             let mixed = AgentUsageSummary.snapshot(records: repriceStore.records + [claudePriced], limits: [:], live: [],
-                                                   plans: [:], providers: [.claude, .antigravity], now: testNow).usage(.today)
+                                                   plans: [:], providers: [.claude, .antigravity], now: testNow,
+                                                   calendar: utc).usage(.today)
             suite.expect(record?.model == "gemini-2.5-pro" && record?.cost == nil && record?.savings == 0
                             && usage.total.unpriced == 0 && usage.fullyPriced
                             && mixed.fullyPriced && mixed.total.cost == 0.5,
